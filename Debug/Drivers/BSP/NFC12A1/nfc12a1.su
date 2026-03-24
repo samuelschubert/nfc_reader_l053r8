@@ -1,0 +1,5 @@
+../Drivers/BSP/NFC12A1/nfc12a1.c:63:6:NFC12A1_LED_Init	48	static
+../Drivers/BSP/NFC12A1/nfc12a1.c:91:6:NFC12A1_LED_DeInit	40	static
+../Drivers/BSP/NFC12A1/nfc12a1.c:107:6:NFC12A1_LED_ON	16	static
+../Drivers/BSP/NFC12A1/nfc12a1.c:117:6:NFC12A1_LED_OFF	16	static
+../Drivers/BSP/NFC12A1/nfc12a1.c:127:6:NFC12A1_LED_Toggle	16	static

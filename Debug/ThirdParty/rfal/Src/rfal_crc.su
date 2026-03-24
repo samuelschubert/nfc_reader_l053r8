@@ -1,0 +1,2 @@
+../ThirdParty/rfal/Src/rfal_crc.c:39:10:rfalCrcCalculateCcitt	32	static
+../ThirdParty/rfal/Src/rfal_crc.c:57:17:rfalCrcUpdateCcitt	32	static

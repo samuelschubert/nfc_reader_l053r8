@@ -1,0 +1,14 @@
+../Core/Src/rfal_platform.c:18:15:platformTimerCreate	1
+../Core/Src/rfal_platform.c:23:6:platformTimerDestroy	1
+../Core/Src/rfal_platform.c:28:6:platformTimerIsExpired	1
+../Core/Src/rfal_platform.c:34:6:platformSpiSelect	1
+../Core/Src/rfal_platform.c:39:6:platformSpiDeselect	1
+../Core/Src/rfal_platform.c:44:6:platformSpiTxRx	7
+../Core/Src/rfal_platform.c:55:6:platformResetST25R	1
+../Core/Src/rfal_platform.c:68:6:platformIrqST25RPinInitialize	1
+../Core/Src/rfal_platform.c:73:6:platformIrqST25RSetCallback	1
+../Core/Src/rfal_platform.c:78:6:platformIrqST25RCallCallback	2
+../Core/Src/rfal_platform.c:85:6:platformLedsInitialize	1
+../Core/Src/rfal_platform.c:86:6:platformErrorHandle	1
+../Core/Src/rfal_platform.c:88:10:platformTimerGetRemaining	2
+../Core/Src/rfal_platform.c:95:6:platformDelay	1

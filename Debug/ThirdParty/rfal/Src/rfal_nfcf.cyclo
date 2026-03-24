@@ -1,0 +1,12 @@
+../ThirdParty/rfal/Src/rfal_nfcf.c:158:13:rfalNfcfComputeValidSENF	14
+../ThirdParty/rfal/Src/rfal_nfcf.c:239:12:rfalNfcfPollerInitialize	4
+../ThirdParty/rfal/Src/rfal_nfcf.c:259:12:rfalNfcfPollerPoll	1
+../ThirdParty/rfal/Src/rfal_nfcf.c:265:12:rfalNfcfPollerCheckPresence	3
+../ThirdParty/rfal/Src/rfal_nfcf.c:276:12:rfalNfcfPollerStartCheckPresence	1
+../ThirdParty/rfal/Src/rfal_nfcf.c:288:12:rfalNfcfPollerGetCheckPresenceStatus	1
+../ThirdParty/rfal/Src/rfal_nfcf.c:295:12:rfalNfcfPollerCollisionResolution	3
+../ThirdParty/rfal/Src/rfal_nfcf.c:307:12:rfalNfcfPollerStartCollisionResolution	4
+../ThirdParty/rfal/Src/rfal_nfcf.c:337:12:rfalNfcfPollerGetCollisionResolutionStatus	13
+../ThirdParty/rfal/Src/rfal_nfcf.c:415:12:rfalNfcfPollerCheck	19
+../ThirdParty/rfal/Src/rfal_nfcf.c:503:12:rfalNfcfPollerUpdate	20
+../ThirdParty/rfal/Src/rfal_nfcf.c:603:6:rfalNfcfListenerIsT3TReq	6
