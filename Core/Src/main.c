@@ -177,7 +177,7 @@ int main(void)
   char buf[64];
   snprintf(buf, sizeof(buf), "%d\r\n", (int)err);
   uart2_print(buf);
-
+////
   /* USER CODE END 2 */
 
   /* USER CODE BEGIN WHILE */
