@@ -51,7 +51,7 @@
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
-
+volatile uint32_t st25r_irq_cnt = 0;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -145,25 +145,24 @@ int main(void)
   /* USER CODE BEGIN 2 */
 
   uart2_print("UART OK\r\n");
-
   platformResetST25R();
   uart2_print("Reset done\r\n");
 
   ReturnCode err;
+  char b[48];
+  char buf[64];
 
   err = rfalInitialize();
-  char b[48];
   snprintf(b, sizeof(b), "rfalInitialize err=%d\r\n", (int)err);
   uart2_print(b);
-  if(err != ERR_NONE) Error_Handler();
+  if (err != ERR_NONE) Error_Handler();
 
   err = rfalNfcInitialize();
   snprintf(b, sizeof(b), "rfalNfcInitialize err=%d\r\n", (int)err);
   uart2_print(b);
-  if(err != ERR_NONE) Error_Handler();
+  if (err != ERR_NONE) Error_Handler();
 
-
-  /* Discover param: NFC-V (zum Gegencheck) */
+  /* Discover param: NFC-V */
   static rfalNfcDiscoverParam discParam;
   memset(&discParam, 0, sizeof(discParam));
   discParam.compMode      = RFAL_COMPLIANCE_MODE_NFC;
@@ -173,11 +172,9 @@ int main(void)
 
   err = rfalNfcDeactivate(false);
   err = rfalNfcDiscover(&discParam);
-  uart2_print("rfalNfcDiscover err=");
-  char buf[64];
-  snprintf(buf, sizeof(buf), "%d\r\n", (int)err);
+  snprintf(buf, sizeof(buf), "rfalNfcDiscover err=%d\r\n", (int)err);
   uart2_print(buf);
-////
+
   /* USER CODE END 2 */
 
   /* USER CODE BEGIN WHILE */
@@ -196,6 +193,22 @@ int main(void)
 	    lastCnt = devCnt;
 	    char s[32];
 	    snprintf(s, sizeof(s), "devCnt=%u\r\n", devCnt);
+	    uart2_print(s);
+	  }
+
+	  extern volatile uint32_t st25r_irq_cnt;
+
+	  static uint32_t last_ms = 0, last_irq = 0;
+	  if (HAL_GetTick() - last_ms > 1000) {
+	    last_ms = HAL_GetTick();
+	    uint32_t now = st25r_irq_cnt;
+
+	    char s[64];
+	    snprintf(s, sizeof(s), "irq/s=%lu devCnt=%u state=%d\r\n",
+	             (unsigned long)(now - last_irq),
+	             (unsigned)devCnt,
+	             (int)rfalNfcGetState());
+	    last_irq = now;
 	    uart2_print(s);
 	  }
   }
@@ -261,6 +274,7 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
     platformIrqST25RCallCallback();
   }
 }
+
 /* USER CODE END 4 */
 
 /**
