@@ -1,5 +1,7 @@
+../Core/Inc/rfal_platform.h:52:20:platformEnterCritical	2
+../Core/Inc/rfal_platform.h:64:20:platformExitCritical	4
 ../Drivers/BSP/Components/st25r500/st25r500_com.c:142:13:st25r500comStart	1
-../Drivers/BSP/Components/st25r500/st25r500_com.c:157:13:st25r500comStop	2
+../Drivers/BSP/Components/st25r500/st25r500_com.c:157:13:st25r500comStop	1
 ../Drivers/BSP/Components/st25r500/st25r500_com.c:168:13:st25r500comTx	2
 ../Drivers/BSP/Components/st25r500/st25r500_com.c:193:13:st25r500comRx	4
 ../Drivers/BSP/Components/st25r500/st25r500_com.c:236:13:st25r500comTxByte	1

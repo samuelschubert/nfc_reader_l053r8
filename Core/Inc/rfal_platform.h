@@ -46,16 +46,41 @@ typedef struct
 #define ST25R_INT_PIN     (GPIO_PIN_0)
 
 /* ====== Critical section / Schutz ====== */
-extern uint32_t g_platform_primask;
+extern volatile uint32_t g_platform_saved_primask;
+extern volatile uint32_t g_platform_irq_nesting;
 
-#define platformProtectST25RComm()            do { g_platform_primask = __get_PRIMASK(); __disable_irq(); } while(0)
-#define platformUnprotectST25RComm()          do { if(g_platform_primask == 0U) { __enable_irq(); } } while(0)
+static inline void platformEnterCritical(void)
+{
+  uint32_t primask = __get_PRIMASK();
+  __disable_irq();
 
-/* Diese 4 sind in deinem Log als fehlend aufgefallen -> sonst "implicit declaration" */
-#define platformProtectWorker()               platformProtectST25RComm()
-#define platformUnprotectWorker()             platformUnprotectST25RComm()
-#define platformProtectST25RIrqStatus()       platformProtectST25RComm()
-#define platformUnprotectST25RIrqStatus()     platformUnprotectST25RComm()
+  if (g_platform_irq_nesting == 0U)
+  {
+    g_platform_saved_primask = primask;
+  }
+  g_platform_irq_nesting++;
+}
+
+static inline void platformExitCritical(void)
+{
+  if (g_platform_irq_nesting > 0U)
+  {
+    g_platform_irq_nesting--;
+
+    if ((g_platform_irq_nesting == 0U) && (g_platform_saved_primask == 0U))
+    {
+      __enable_irq();
+    }
+  }
+}
+
+#define platformProtectST25RComm()        platformEnterCritical()
+#define platformUnprotectST25RComm()      platformExitCritical()
+
+#define platformProtectWorker()           platformEnterCritical()
+#define platformUnprotectWorker()         platformExitCritical()
+#define platformProtectST25RIrqStatus()   platformEnterCritical()
+#define platformUnprotectST25RIrqStatus() platformExitCritical()
 
 /* ====== GPIO helpers ====== */
 #define platformGpioIsHigh(port, pin)         (HAL_GPIO_ReadPin((port),(pin)) == GPIO_PIN_SET)

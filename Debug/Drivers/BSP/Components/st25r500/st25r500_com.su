@@ -1,5 +1,7 @@
-../Drivers/BSP/Components/st25r500/st25r500_com.c:142:13:st25r500comStart	16	static,ignoring_inline_asm
-../Drivers/BSP/Components/st25r500/st25r500_com.c:157:13:st25r500comStop	8	static,ignoring_inline_asm
+../Core/Inc/rfal_platform.h:52:20:platformEnterCritical	16	static,ignoring_inline_asm
+../Core/Inc/rfal_platform.h:64:20:platformExitCritical	8	static,ignoring_inline_asm
+../Drivers/BSP/Components/st25r500/st25r500_com.c:142:13:st25r500comStart	8	static
+../Drivers/BSP/Components/st25r500/st25r500_com.c:157:13:st25r500comStop	8	static
 ../Drivers/BSP/Components/st25r500/st25r500_com.c:168:13:st25r500comTx	24	static
 ../Drivers/BSP/Components/st25r500/st25r500_com.c:193:13:st25r500comRx	24	static
 ../Drivers/BSP/Components/st25r500/st25r500_com.c:236:13:st25r500comTxByte	32	static

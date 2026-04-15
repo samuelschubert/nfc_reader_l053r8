@@ -1,3 +1,5 @@
+../Core/Inc/rfal_platform.h:52:20:platformEnterCritical	2
+../Core/Inc/rfal_platform.h:64:20:platformExitCritical	4
 ../Drivers/BSP/Components/st25r500/rfal_rfst25r500.c:477:12:rfalInitialize	2
 ../Drivers/BSP/Components/st25r500/rfal_rfst25r500.c:557:12:rfalCalibrate	2
 ../Drivers/BSP/Components/st25r500/rfal_rfst25r500.c:574:12:rfalAdjustRegulators	1
@@ -38,7 +40,7 @@
 ../Drivers/BSP/Components/st25r500/rfal_rfst25r500.c:1396:12:rfalGetTransceiveStatus	2
 ../Drivers/BSP/Components/st25r500/rfal_rfst25r500.c:1403:12:rfalGetTransceiveRSSI	2
 ../Drivers/BSP/Components/st25r500/rfal_rfst25r500.c:1426:6:rfalIsTransceiveSubcDetected	3
-../Drivers/BSP/Components/st25r500/rfal_rfst25r500.c:1437:6:rfalWorker	3
+../Drivers/BSP/Components/st25r500/rfal_rfst25r500.c:1437:6:rfalWorker	2
 ../Drivers/BSP/Components/st25r500/rfal_rfst25r500.c:1474:13:rfalErrorHandling	7
 ../Drivers/BSP/Components/st25r500/rfal_rfst25r500.c:1509:13:rfalCleanupTransceive	2
 ../Drivers/BSP/Components/st25r500/rfal_rfst25r500.c:1549:13:rfalPrepareTransceive	19

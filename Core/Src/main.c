@@ -51,7 +51,11 @@
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
+
+volatile uint32_t exti_cb_cnt = 0;
+volatile uint16_t last_exti_pin = 0;
 volatile uint32_t st25r_irq_cnt = 0;
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -141,7 +145,6 @@ int main(void)
   MX_GPIO_Init();
   MX_USART2_UART_Init();
   MX_SPI1_Init();
-
   /* USER CODE BEGIN 2 */
 
   uart2_print("UART OK\r\n");
@@ -167,7 +170,7 @@ int main(void)
   memset(&discParam, 0, sizeof(discParam));
   discParam.compMode      = RFAL_COMPLIANCE_MODE_NFC;
   discParam.devLimit      = 1;
-  discParam.techs2Find    = RFAL_NFC_POLL_TECH_V;
+  discParam.techs2Find    = RFAL_NFC_POLL_TECH_A | RFAL_NFC_POLL_TECH_V;
   discParam.totalDuration = 3000;
 
   err = rfalNfcDeactivate(false);
@@ -177,42 +180,41 @@ int main(void)
 
   /* USER CODE END 2 */
 
+  /* Infinite loop */
   /* USER CODE BEGIN WHILE */
-  static uint32_t last = 0;
 
   while (1)
   {
-	  rfalNfcWorker();
+    rfalNfcWorker();
 
-	  rfalNfcDevice *devList = NULL;
-	  uint8_t devCnt = 0;
-	  rfalNfcGetDevicesFound(&devList, &devCnt);
+    rfalNfcDevice *devList = NULL;
+    uint8_t devCnt = 0;
+    rfalNfcGetDevicesFound(&devList, &devCnt);
 
-	  static uint8_t lastCnt = 0xFF;
-	  if (devCnt != lastCnt) {
-	    lastCnt = devCnt;
-	    char s[32];
-	    snprintf(s, sizeof(s), "devCnt=%u\r\n", devCnt);
-	    uart2_print(s);
-	  }
+    static uint32_t last_ms = 0;
+    static uint32_t last_irq = 0;
 
-	  extern volatile uint32_t st25r_irq_cnt;
+    if (HAL_GetTick() - last_ms > 1000)
+    {
+      last_ms = HAL_GetTick();
 
-	  static uint32_t last_ms = 0, last_irq = 0;
-	  if (HAL_GetTick() - last_ms > 1000) {
-	    last_ms = HAL_GetTick();
-	    uint32_t now = st25r_irq_cnt;
-
-	    char s[64];
-	    snprintf(s, sizeof(s), "irq/s=%lu devCnt=%u state=%d\r\n",
-	             (unsigned long)(now - last_irq),
-	             (unsigned)devCnt,
-	             (int)rfalNfcGetState());
-	    last_irq = now;
-	    uart2_print(s);
-	  }
+      GPIO_PinState p0 = HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_0);
+      GPIO_PinState p1 = HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_1);
+      char s[140];
+      snprintf(s, sizeof(s),
+        "cb=%lu last=0x%04X irq/s=%lu PA0=%d PA1=%d devCnt=%u state=%d\r\n",
+        (unsigned long)exti_cb_cnt,
+        (unsigned)last_exti_pin,
+        (unsigned long)(st25r_irq_cnt - last_irq),
+        (int)p0, (int)p1,
+        (unsigned)devCnt,
+        (int)rfalNfcGetState());
+      last_irq = st25r_irq_cnt;
+      uart2_print(s);
+    }
   }
-  /* USER CODE END WHILE */
+
+    /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
   /* USER CODE END 3 */
@@ -267,10 +269,14 @@ void SystemClock_Config(void)
 }
 
 /* USER CODE BEGIN 4 */
+
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
-  if (GPIO_Pin == ST25R_INT_PIN)
-  {
+  exti_cb_cnt++;
+  last_exti_pin = GPIO_Pin;
+
+  if (GPIO_Pin == GPIO_PIN_0) {        // PA0 = IRQ_MCU
+    st25r_irq_cnt++;
     platformIrqST25RCallCallback();
   }
 }

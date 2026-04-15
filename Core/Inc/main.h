@@ -61,7 +61,6 @@ void Error_Handler(void);
 #define B1_GPIO_Port GPIOC
 #define NFC_IRQ_Pin GPIO_PIN_0
 #define NFC_IRQ_GPIO_Port GPIOA
-#define NFC_IRQ_EXTI_IRQn EXTI0_1_IRQn
 #define USART_TX_Pin GPIO_PIN_2
 #define USART_TX_GPIO_Port GPIOA
 #define USART_RX_Pin GPIO_PIN_3

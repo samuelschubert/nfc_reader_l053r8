@@ -11,7 +11,8 @@
 #include "spi.h"
 #include "gpio.h"
 
-uint32_t g_platform_primask = 0U;
+volatile uint32_t g_platform_saved_primask = 0U;
+volatile uint32_t g_platform_irq_nesting   = 0U;
 
 static void (*s_st25rIrqCb)(void) = NULL;
 
@@ -54,15 +55,22 @@ void platformSpiTxRx(const uint8_t* tx, uint8_t* rx, uint16_t len)
 
 void platformResetST25R(void)
 {
-  /* CS sicher inaktiv */
+  /* CS inaktiv lassen */
   HAL_GPIO_WritePin(ST25R_CS_PORT, ST25R_CS_PIN, GPIO_PIN_SET);
 
-  /* Reset-Puls: HIGH = Reset, danach LOW = Betrieb */
+  /* Reset ist active-high:
+     kurz HIGH = Reset aktiv
+     danach LOW = normaler Betrieb */
   HAL_GPIO_WritePin(ST25R_RST_PORT, ST25R_RST_PIN, GPIO_PIN_SET);
   HAL_Delay(5);
   HAL_GPIO_WritePin(ST25R_RST_PORT, ST25R_RST_PIN, GPIO_PIN_RESET);
-  HAL_Delay(10);
+  HAL_Delay(5);
 }
+
+
+
+
+
 
 /* IRQ */
 void platformIrqST25RPinInitialize(void)
