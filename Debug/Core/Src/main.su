@@ -1,6 +1,8 @@
 ../Core/Src/main.c:74:13:uart2_print	16	static
-../Core/Src/main.c:79:13:uart_hexln	32	static
-../Core/Src/main.c:95:5:main	368	static
-../Core/Src/main.c:268:6:SystemClock_Config	128	static
-../Core/Src/main.c:314:6:HAL_GPIO_EXTI_Callback	16	static
-../Core/Src/main.c:331:6:Error_Handler	8	static,ignoring_inline_asm
+../Core/Src/main.c:82:13:uart_hexln	32	static
+../Core/Src/main.c:92:19:t2t_read_bytes	64	static
+../Core/Src/main.c:127:13:t2t_print_ndef_text	192	static
+../Core/Src/main.c:295:5:main	424	static
+../Core/Src/main.c:505:6:SystemClock_Config	128	static
+../Core/Src/main.c:551:6:HAL_GPIO_EXTI_Callback	16	static
+../Core/Src/main.c:568:6:Error_Handler	8	static,ignoring_inline_asm

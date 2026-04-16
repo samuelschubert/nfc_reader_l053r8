@@ -76,6 +76,9 @@ static void uart2_print(const char *s)
   HAL_UART_Transmit(&huart2, (uint8_t*)s, (uint16_t)strlen(s), 1000);
 }
 
+#define APP_T2T_CHUNK_LEN   RFAL_T2T_READ_DATA_LEN   /* 16 Byte */
+#define APP_T2T_MAX_NDEF    128U
+
 static void uart_hexln(const uint8_t *b, uint16_t len)
 {
   char t[5];
@@ -84,6 +87,203 @@ static void uart_hexln(const uint8_t *b, uint16_t len)
     uart2_print(t);
   }
   uart2_print("\r\n");
+}
+
+static ReturnCode t2t_read_bytes(uint8_t startPage, uint8_t *dst, uint16_t wantLen, uint16_t *outLen)
+{
+  ReturnCode rc;
+  uint16_t total = 0;
+  uint8_t page = startPage;
+
+  while (total < wantLen)
+  {
+    uint8_t rx[APP_T2T_CHUNK_LEN];
+    uint16_t rcvLen = 0;
+
+    rc = rfalT2TPollerRead(page, rx, sizeof(rx), &rcvLen);
+    if (rc != ERR_NONE)
+    {
+      *outLen = total;
+      return rc;
+    }
+
+    if (rcvLen != APP_T2T_CHUNK_LEN)
+    {
+      *outLen = total;
+      return ERR_REQUEST;
+    }
+
+    uint16_t copyLen = (wantLen - total > APP_T2T_CHUNK_LEN) ? APP_T2T_CHUNK_LEN : (wantLen - total);
+    memcpy(&dst[total], rx, copyLen);
+    total += copyLen;
+
+    page += 4;   /* READ(page) liest 4 Pages = 16 Byte */
+  }
+
+  *outLen = total;
+  return ERR_NONE;
+}
+
+static void t2t_print_ndef_text(const uint8_t *buf, uint16_t len)
+{
+  char s[96];
+  uint16_t i = 0;
+
+  /* TLV suchen */
+  while (i < len)
+  {
+    uint8_t tlv = buf[i];
+
+    if (tlv == 0x00)   /* NULL TLV */
+    {
+      i++;
+      continue;
+    }
+
+    if (tlv == 0xFE)   /* Terminator */
+    {
+      uart2_print("NDEF: terminator reached, no record\r\n");
+      return;
+    }
+
+    if (tlv != 0x03)   /* nicht NDEF Message TLV */
+    {
+      snprintf(s, sizeof(s), "NDEF: unsupported TLV 0x%02X\r\n", tlv);
+      uart2_print(s);
+      return;
+    }
+
+    break;
+  }
+
+  if (i + 1 >= len)
+  {
+    uart2_print("NDEF: TLV too short\r\n");
+    return;
+  }
+
+  uint16_t ndefLen = 0;
+  uint16_t ndefStart = 0;
+
+  if (buf[i + 1] == 0xFF)
+  {
+    if (i + 3 >= len)
+    {
+      uart2_print("NDEF: extended length header incomplete\r\n");
+      return;
+    }
+    ndefLen = ((uint16_t)buf[i + 2] << 8) | buf[i + 3];
+    ndefStart = i + 4;
+  }
+  else
+  {
+    ndefLen = buf[i + 1];
+    ndefStart = i + 2;
+  }
+
+  snprintf(s, sizeof(s), "NDEF length=%u\r\n", (unsigned)ndefLen);
+  uart2_print(s);
+
+  if ((ndefStart + ndefLen) > len)
+  {
+    uart2_print("NDEF: buffer too small for full message\r\n");
+    return;
+  }
+
+  if (ndefLen < 5)
+  {
+    uart2_print("NDEF: record too short\r\n");
+    return;
+  }
+
+  const uint8_t *rec = &buf[ndefStart];
+
+  uint8_t hdr = rec[0];
+  uint8_t typeLen = rec[1];
+  uint32_t payloadLen = 0;
+  uint16_t pos = 2;
+
+  if (hdr & 0x10)   /* SR = short record */
+  {
+    payloadLen = rec[pos];
+    pos += 1;
+  }
+  else
+  {
+    payloadLen = ((uint32_t)rec[pos] << 24) |
+                 ((uint32_t)rec[pos + 1] << 16) |
+                 ((uint32_t)rec[pos + 2] << 8) |
+                 ((uint32_t)rec[pos + 3]);
+    pos += 4;
+  }
+
+  uint8_t idLen = 0;
+  if (hdr & 0x08)   /* IL */
+  {
+    idLen = rec[pos];
+    pos += 1;
+  }
+
+  if ((pos + typeLen + idLen + payloadLen) > ndefLen)
+  {
+    uart2_print("NDEF: malformed record\r\n");
+    return;
+  }
+
+  const uint8_t *typeField = &rec[pos];
+  pos += typeLen;
+
+  pos += idLen;
+
+  const uint8_t *payload = &rec[pos];
+
+  snprintf(s, sizeof(s),
+           "NDEF rec hdr=0x%02X typeLen=%u payloadLen=%lu\r\n",
+           hdr, typeLen, (unsigned long)payloadLen);
+  uart2_print(s);
+
+  if ((typeLen == 1) && (typeField[0] == 'T'))
+  {
+    if (payloadLen < 1)
+    {
+      uart2_print("TEXT: payload too short\r\n");
+      return;
+    }
+
+    uint8_t status = payload[0];
+    uint8_t langLen = status & 0x3F;
+    uint8_t utf16 = (status & 0x80) ? 1U : 0U;
+
+    if (payloadLen < (uint32_t)(1U + langLen))
+    {
+      uart2_print("TEXT: invalid language length\r\n");
+      return;
+    }
+
+    snprintf(s, sizeof(s), "TEXT encoding=%s lang=", utf16 ? "UTF16" : "UTF8");
+    uart2_print(s);
+
+    for (uint8_t k = 0; k < langLen; k++)
+    {
+      char c[2] = { (char)payload[1 + k], 0 };
+      uart2_print(c);
+    }
+    uart2_print("\r\n");
+
+    uint32_t textLen = payloadLen - 1U - langLen;
+    uart2_print("TEXT: ");
+
+    for (uint32_t k = 0; k < textLen; k++)
+    {
+      char c[2] = { (char)payload[1U + langLen + k], 0 };
+      uart2_print(c);
+    }
+    uart2_print("\r\n");
+  }
+  else
+  {
+    uart2_print("NDEF: first record is not a Text record\r\n");
+  }
 }
 
 /* USER CODE END 0 */
@@ -165,19 +365,24 @@ int main(void)
     uint8_t devCnt = 0;
     rfalNfcGetDevicesFound(&devList, &devCnt);
 
-    static uint32_t last_ms = 0;
-    static uint32_t last_irq = 0;
-    static uint8_t  tag_reported = 0;
-    static uint32_t last_read_ms = 0;
+    static uint32_t last_status_ms = 0;
+    static uint32_t last_read_ms   = 0;
+    static uint32_t last_irq       = 0;
+
+    static uint8_t  tag_reported   = 0;
+    static uint8_t  have_last_data = 0;
+    static uint8_t  last_data[APP_T2T_MAX_NDEF];
 
     rfalNfcState state = rfalNfcGetState();
 
-    if (HAL_GetTick() - last_ms > 1000)
+    /* Heartbeat nur 1x pro Sekunde */
+    if ((HAL_GetTick() - last_status_ms) >= 1000U)
     {
-      last_ms = HAL_GetTick();
+      last_status_ms = HAL_GetTick();
 
       GPIO_PinState p0 = HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_0);
       GPIO_PinState p1 = HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_1);
+
       char s[140];
       snprintf(s, sizeof(s),
         "cb=%lu last=0x%04X irq/s=%lu PA0=%d PA1=%d devCnt=%u state=%d\r\n",
@@ -191,67 +396,99 @@ int main(void)
       uart2_print(s);
     }
 
-    if ((devCnt > 0) && (state == RFAL_NFC_STATE_ACTIVATED))
+    /* Tag aktiv */
+    if ((devCnt > 0U) && (state == RFAL_NFC_STATE_ACTIVATED))
     {
-        rfalNfcDevice *dev = &devList[0];
+      rfalNfcDevice *dev = &devList[0];
 
-        if (!tag_reported)
+      if (!tag_reported)
+      {
+        char s[160];
+
+        snprintf(s, sizeof(s),
+          "TAG FOUND: type=%u rfIf=%u uidLen=%u\r\n",
+          (unsigned)dev->type,
+          (unsigned)dev->rfInterface,
+          (unsigned)dev->nfcidLen);
+        uart2_print(s);
+
+        uart2_print("UID: ");
+        uart_hexln(dev->nfcid, dev->nfcidLen);
+
+        if (dev->type == RFAL_NFC_LISTEN_TYPE_NFCA)
         {
-            char s[160];
+          snprintf(s, sizeof(s),
+            "NFCA subtype=%u SAK=0x%02X\r\n",
+            (unsigned)dev->dev.nfca.type,
+            (unsigned)dev->dev.nfca.selRes.sak);
+          uart2_print(s);
+        }
 
-            snprintf(s, sizeof(s),
-              "TAG FOUND: type=%u rfIf=%u uidLen=%u\r\n",
-              (unsigned)dev->type,
-              (unsigned)dev->rfInterface,
-              (unsigned)dev->nfcidLen);
+        tag_reported   = 1;
+        have_last_data = 0;
+        last_read_ms   = HAL_GetTick();
+      }
+
+      /* Alle 10 ms lesen */
+      if ((HAL_GetTick() - last_read_ms) >= 10U)
+      {
+        last_read_ms = HAL_GetTick();
+
+        if ((dev->type == RFAL_NFC_LISTEN_TYPE_NFCA) &&
+            (dev->dev.nfca.type == RFAL_NFCA_T2T))
+        {
+            uint8_t rx[APP_T2T_MAX_NDEF];
+            uint16_t rcvLen = 0;
+            ReturnCode rc;
+
+            rc = t2t_read_bytes(4, rx, sizeof(rx), &rcvLen);
+
+            if (rc == ERR_NONE)
+            {
+              if ((!have_last_data) ||
+                  (rcvLen != APP_T2T_MAX_NDEF) ||
+                  (memcmp(last_data, rx, APP_T2T_MAX_NDEF) != 0))
+              {
+                char s[64];
+                snprintf(s, sizeof(s), "DATA CHANGED len=%u\r\n", (unsigned)rcvLen);
+                uart2_print(s);
+
+                uart2_print("RAW: ");
+                uart_hexln(rx, rcvLen);
+
+                t2t_print_ndef_text(rx, rcvLen);
+
+                memcpy(last_data, rx, APP_T2T_MAX_NDEF);
+                have_last_data = 1;
+              }
+            }
+          else
+          {
+            char s[80];
+            snprintf(s, sizeof(s), "READ ERROR rc=%d -> rediscover\r\n", (int)rc);
             uart2_print(s);
 
-            uart2_print("UID: ");
-            uart_hexln(dev->nfcid, dev->nfcidLen);
+            tag_reported   = 0;
+            have_last_data = 0;
 
-            if (dev->type == RFAL_NFC_LISTEN_TYPE_NFCA)
-            {
-                snprintf(s, sizeof(s),
-                  "NFCA subtype=%u SAK=0x%02X\r\n",
-                  (unsigned)dev->dev.nfca.type,
-                  (unsigned)dev->dev.nfca.selRes.sak);
-                uart2_print(s);
-            }
-
-            tag_reported = 1;
+            rfalNfcDeactivate(false);
+            rfalNfcDiscover(&discParam);
+          }
         }
-
-        if ((HAL_GetTick() - last_read_ms) >= 100)
-        {
-            last_read_ms = HAL_GetTick();
-
-            if ((dev->type == RFAL_NFC_LISTEN_TYPE_NFCA) &&
-                (dev->dev.nfca.type == RFAL_NFCA_T2T))
-            {
-                uint8_t rx[RFAL_T2T_READ_DATA_LEN];
-                uint16_t rcvLen = 0;
-                ReturnCode rc;
-
-                rc = rfalT2TPollerRead(4, rx, sizeof(rx), &rcvLen);
-
-                char s[80];
-                snprintf(s, sizeof(s),
-                  "T2T read rc=%d len=%u\r\n",
-                  (int)rc,
-                  (unsigned)rcvLen);
-                uart2_print(s);
-
-                if (rc == ERR_NONE)
-                {
-                    uart2_print("DATA: ");
-                    uart_hexln(rx, rcvLen);
-                }
-            }
-        }
+      }
     }
     else
     {
-        tag_reported = 0;
+      /* Tag weg oder noch nicht aktiviert */
+      if (tag_reported)
+      {
+        uart2_print("TAG LOST -> rediscover\r\n");
+        tag_reported   = 0;
+        have_last_data = 0;
+
+        rfalNfcDeactivate(false);
+        rfalNfcDiscover(&discParam);
+      }
     }
   }
 
