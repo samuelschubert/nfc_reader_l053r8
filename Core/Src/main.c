@@ -24,24 +24,38 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+
 #include "rfal_utils.h"
 #include "rfal_nfc.h"
-#include <string.h>
-#include <stdio.h>
 #include "rfal_rf.h"
-#include "st_errno.h"
 #include "rfal_nfca.h"
 #include "rfal_t2t.h"
+#include "st_errno.h"
+
+#include <string.h>
+#include <stdio.h>
 
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
 
+typedef enum
+{
+  APP_STATE_DISCOVER = 0,
+  APP_STATE_ACTIVE_READ
+} AppState_t;
+
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+
+/* Private define ------------------------------------------------------------*/
+/* USER CODE BEGIN PD */
+
+#define APP_T2T_CHUNK_LEN   RFAL_T2T_READ_DATA_LEN
+#define APP_T2T_MAX_NDEF    128U
 
 /* USER CODE END PD */
 
@@ -58,11 +72,24 @@ volatile uint32_t exti_cb_cnt = 0;
 volatile uint16_t last_exti_pin = 0;
 volatile uint32_t st25r_irq_cnt = 0;
 
+static AppState_t appState = APP_STATE_DISCOVER;
+static rfalNfcDiscoverParam discParam;
+
+static uint8_t  have_last_data = 0;
+static uint8_t  last_data[APP_T2T_MAX_NDEF];
+
+static uint32_t last_status_ms = 0;
+static uint32_t last_read_ms   = 0;
+static uint32_t last_irq       = 0;
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 /* USER CODE BEGIN PFP */
+
+static ReturnCode appReadCurrentTag(rfalNfcDevice *dev, uint8_t *buf, uint16_t bufSize, uint16_t *outLen);
+static void appProcessCurrentTagData(rfalNfcDevice *dev, const uint8_t *buf, uint16_t len);
 
 /* USER CODE END PFP */
 
@@ -75,9 +102,6 @@ static void uart2_print(const char *s)
 {
   HAL_UART_Transmit(&huart2, (uint8_t*)s, (uint16_t)strlen(s), 1000);
 }
-
-#define APP_T2T_CHUNK_LEN   RFAL_T2T_READ_DATA_LEN   /* 16 Byte */
-#define APP_T2T_MAX_NDEF    128U
 
 static void uart_hexln(const uint8_t *b, uint16_t len)
 {
@@ -113,7 +137,7 @@ static ReturnCode t2t_read_bytes(uint8_t startPage, uint8_t *dst, uint16_t wantL
       return ERR_REQUEST;
     }
 
-    uint16_t copyLen = (wantLen - total > APP_T2T_CHUNK_LEN) ? APP_T2T_CHUNK_LEN : (wantLen - total);
+    uint16_t copyLen = ((wantLen - total) > APP_T2T_CHUNK_LEN) ? APP_T2T_CHUNK_LEN : (wantLen - total);
     memcpy(&dst[total], rx, copyLen);
     total += copyLen;
 
@@ -129,24 +153,23 @@ static void t2t_print_ndef_text(const uint8_t *buf, uint16_t len)
   char s[96];
   uint16_t i = 0;
 
-  /* TLV suchen */
   while (i < len)
   {
     uint8_t tlv = buf[i];
 
-    if (tlv == 0x00)   /* NULL TLV */
+    if (tlv == 0x00)
     {
       i++;
       continue;
     }
 
-    if (tlv == 0xFE)   /* Terminator */
+    if (tlv == 0xFE)
     {
       uart2_print("NDEF: terminator reached, no record\r\n");
       return;
     }
 
-    if (tlv != 0x03)   /* nicht NDEF Message TLV */
+    if (tlv != 0x03)
     {
       snprintf(s, sizeof(s), "NDEF: unsupported TLV 0x%02X\r\n", tlv);
       uart2_print(s);
@@ -203,7 +226,7 @@ static void t2t_print_ndef_text(const uint8_t *buf, uint16_t len)
   uint32_t payloadLen = 0;
   uint16_t pos = 2;
 
-  if (hdr & 0x10)   /* SR = short record */
+  if (hdr & 0x10)
   {
     payloadLen = rec[pos];
     pos += 1;
@@ -218,7 +241,7 @@ static void t2t_print_ndef_text(const uint8_t *buf, uint16_t len)
   }
 
   uint8_t idLen = 0;
-  if (hdr & 0x08)   /* IL */
+  if (hdr & 0x08)
   {
     idLen = rec[pos];
     pos += 1;
@@ -232,7 +255,6 @@ static void t2t_print_ndef_text(const uint8_t *buf, uint16_t len)
 
   const uint8_t *typeField = &rec[pos];
   pos += typeLen;
-
   pos += idLen;
 
   const uint8_t *payload = &rec[pos];
@@ -286,6 +308,169 @@ static void t2t_print_ndef_text(const uint8_t *buf, uint16_t len)
   }
 }
 
+static void appLogHeartbeat(uint8_t devCnt, rfalNfcState state)
+{
+  if ((HAL_GetTick() - last_status_ms) >= 1000U)
+  {
+    last_status_ms = HAL_GetTick();
+
+    GPIO_PinState p0 = HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_0);
+    GPIO_PinState p1 = HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_1);
+
+    char s[140];
+    snprintf(s, sizeof(s),
+      "APP=%u cb=%lu last=0x%04X irq/s=%lu PA0=%d PA1=%d devCnt=%u state=%d\r\n",
+      (unsigned)appState,
+      (unsigned long)exti_cb_cnt,
+      (unsigned)last_exti_pin,
+      (unsigned long)(st25r_irq_cnt - last_irq),
+      (int)p0, (int)p1,
+      (unsigned)devCnt,
+      (int)state);
+
+    last_irq = st25r_irq_cnt;
+    uart2_print(s);
+  }
+}
+
+static void appReportTag(rfalNfcDevice *dev)
+{
+  char s[160];
+
+  snprintf(s, sizeof(s),
+    "TAG FOUND: type=%u rfIf=%u uidLen=%u\r\n",
+    (unsigned)dev->type,
+    (unsigned)dev->rfInterface,
+    (unsigned)dev->nfcidLen);
+  uart2_print(s);
+
+  uart2_print("UID: ");
+  uart_hexln(dev->nfcid, dev->nfcidLen);
+
+  if (dev->type == RFAL_NFC_LISTEN_TYPE_NFCA)
+  {
+    snprintf(s, sizeof(s),
+      "NFCA subtype=%u SAK=0x%02X\r\n",
+      (unsigned)dev->dev.nfca.type,
+      (unsigned)dev->dev.nfca.selRes.sak);
+    uart2_print(s);
+  }
+}
+
+static ReturnCode appReadCurrentTag(rfalNfcDevice *dev, uint8_t *buf, uint16_t bufSize, uint16_t *outLen)
+{
+  if ((dev->type == RFAL_NFC_LISTEN_TYPE_NFCA) &&
+      (dev->dev.nfca.type == RFAL_NFCA_T2T))
+  {
+    return t2t_read_bytes(4, buf, bufSize, outLen);
+  }
+
+  *outLen = 0;
+  return ERR_REQUEST;
+}
+
+static void appProcessCurrentTagData(rfalNfcDevice *dev, const uint8_t *buf, uint16_t len)
+{
+  if ((dev->type == RFAL_NFC_LISTEN_TYPE_NFCA) &&
+      (dev->dev.nfca.type == RFAL_NFCA_T2T))
+  {
+    uart2_print("RAW: ");
+    uart_hexln(buf, len);
+    t2t_print_ndef_text(buf, len);
+    return;
+  }
+
+  uart2_print("Unknown tag data format\r\n");
+}
+
+static void appStartDiscover(void)
+{
+  ReturnCode err;
+  char s[64];
+
+  have_last_data = 0;
+
+  err = rfalNfcDeactivate(false);
+  snprintf(s, sizeof(s), "rfalNfcDeactivate err=%d\r\n", (int)err);
+  uart2_print(s);
+
+  err = rfalNfcDiscover(&discParam);
+  snprintf(s, sizeof(s), "rfalNfcDiscover err=%d\r\n", (int)err);
+  uart2_print(s);
+
+  appState = APP_STATE_DISCOVER;
+}
+
+static void appHandleDiscover(void)
+{
+  rfalNfcDevice *devList = NULL;
+  uint8_t devCnt = 0;
+  rfalNfcState state = rfalNfcGetState();
+
+  rfalNfcGetDevicesFound(&devList, &devCnt);
+  appLogHeartbeat(devCnt, state);
+
+  if ((devCnt > 0U) && (state == RFAL_NFC_STATE_ACTIVATED))
+  {
+    appReportTag(&devList[0]);
+    have_last_data = 0;
+    last_read_ms   = HAL_GetTick();
+    appState       = APP_STATE_ACTIVE_READ;
+  }
+}
+
+static void appHandleActiveRead(void)
+{
+  rfalNfcDevice *devList = NULL;
+  uint8_t devCnt = 0;
+  rfalNfcState state = rfalNfcGetState();
+
+  rfalNfcGetDevicesFound(&devList, &devCnt);
+  appLogHeartbeat(devCnt, state);
+
+  if ((devCnt == 0U) || (state != RFAL_NFC_STATE_ACTIVATED))
+  {
+    uart2_print("TAG LOST -> rediscover\r\n");
+    appStartDiscover();
+    return;
+  }
+
+  if ((HAL_GetTick() - last_read_ms) < 10U)
+  {
+    return;
+  }
+  last_read_ms = HAL_GetTick();
+
+  rfalNfcDevice *dev = &devList[0];
+  uint8_t rx[APP_T2T_MAX_NDEF];
+  uint16_t rcvLen = 0;
+  ReturnCode rc;
+
+  rc = appReadCurrentTag(dev, rx, sizeof(rx), &rcvLen);
+
+  if (rc != ERR_NONE)
+  {
+    char s[80];
+    snprintf(s, sizeof(s), "READ ERROR rc=%d -> rediscover\r\n", (int)rc);
+    uart2_print(s);
+    appStartDiscover();
+    return;
+  }
+
+  if ((!have_last_data) ||
+      (memcmp(last_data, rx, APP_T2T_MAX_NDEF) != 0))
+  {
+    char s[64];
+    snprintf(s, sizeof(s), "DATA CHANGED len=%u\r\n", (unsigned)rcvLen);
+    uart2_print(s);
+
+    appProcessCurrentTagData(dev, rx, rcvLen);
+
+    memcpy(last_data, rx, APP_T2T_MAX_NDEF);
+    have_last_data = 1;
+  }
+}
+
 /* USER CODE END 0 */
 
 /**
@@ -327,7 +512,6 @@ int main(void)
 
   ReturnCode err;
   char b[48];
-  char buf[64];
 
   err = rfalInitialize();
   snprintf(b, sizeof(b), "rfalInitialize err=%d\r\n", (int)err);
@@ -339,18 +523,13 @@ int main(void)
   uart2_print(b);
   if (err != ERR_NONE) Error_Handler();
 
-  /* Discover param: NFC-V */
-  static rfalNfcDiscoverParam discParam;
   memset(&discParam, 0, sizeof(discParam));
   discParam.compMode      = RFAL_COMPLIANCE_MODE_NFC;
   discParam.devLimit      = 1;
   discParam.techs2Find    = RFAL_NFC_POLL_TECH_A | RFAL_NFC_POLL_TECH_V;
   discParam.totalDuration = 3000;
 
-  err = rfalNfcDeactivate(false);
-  err = rfalNfcDiscover(&discParam);
-  snprintf(buf, sizeof(buf), "rfalNfcDiscover err=%d\r\n", (int)err);
-  uart2_print(buf);
+  appStartDiscover();
 
   /* USER CODE END 2 */
 
@@ -361,134 +540,19 @@ int main(void)
   {
     rfalNfcWorker();
 
-    rfalNfcDevice *devList = NULL;
-    uint8_t devCnt = 0;
-    rfalNfcGetDevicesFound(&devList, &devCnt);
-
-    static uint32_t last_status_ms = 0;
-    static uint32_t last_read_ms   = 0;
-    static uint32_t last_irq       = 0;
-
-    static uint8_t  tag_reported   = 0;
-    static uint8_t  have_last_data = 0;
-    static uint8_t  last_data[APP_T2T_MAX_NDEF];
-
-    rfalNfcState state = rfalNfcGetState();
-
-    /* Heartbeat nur 1x pro Sekunde */
-    if ((HAL_GetTick() - last_status_ms) >= 1000U)
+    switch (appState)
     {
-      last_status_ms = HAL_GetTick();
+      case APP_STATE_DISCOVER:
+        appHandleDiscover();
+        break;
 
-      GPIO_PinState p0 = HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_0);
-      GPIO_PinState p1 = HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_1);
+      case APP_STATE_ACTIVE_READ:
+        appHandleActiveRead();
+        break;
 
-      char s[140];
-      snprintf(s, sizeof(s),
-        "cb=%lu last=0x%04X irq/s=%lu PA0=%d PA1=%d devCnt=%u state=%d\r\n",
-        (unsigned long)exti_cb_cnt,
-        (unsigned)last_exti_pin,
-        (unsigned long)(st25r_irq_cnt - last_irq),
-        (int)p0, (int)p1,
-        (unsigned)devCnt,
-        (int)state);
-      last_irq = st25r_irq_cnt;
-      uart2_print(s);
-    }
-
-    /* Tag aktiv */
-    if ((devCnt > 0U) && (state == RFAL_NFC_STATE_ACTIVATED))
-    {
-      rfalNfcDevice *dev = &devList[0];
-
-      if (!tag_reported)
-      {
-        char s[160];
-
-        snprintf(s, sizeof(s),
-          "TAG FOUND: type=%u rfIf=%u uidLen=%u\r\n",
-          (unsigned)dev->type,
-          (unsigned)dev->rfInterface,
-          (unsigned)dev->nfcidLen);
-        uart2_print(s);
-
-        uart2_print("UID: ");
-        uart_hexln(dev->nfcid, dev->nfcidLen);
-
-        if (dev->type == RFAL_NFC_LISTEN_TYPE_NFCA)
-        {
-          snprintf(s, sizeof(s),
-            "NFCA subtype=%u SAK=0x%02X\r\n",
-            (unsigned)dev->dev.nfca.type,
-            (unsigned)dev->dev.nfca.selRes.sak);
-          uart2_print(s);
-        }
-
-        tag_reported   = 1;
-        have_last_data = 0;
-        last_read_ms   = HAL_GetTick();
-      }
-
-      /* Alle 10 ms lesen */
-      if ((HAL_GetTick() - last_read_ms) >= 10U)
-      {
-        last_read_ms = HAL_GetTick();
-
-        if ((dev->type == RFAL_NFC_LISTEN_TYPE_NFCA) &&
-            (dev->dev.nfca.type == RFAL_NFCA_T2T))
-        {
-            uint8_t rx[APP_T2T_MAX_NDEF];
-            uint16_t rcvLen = 0;
-            ReturnCode rc;
-
-            rc = t2t_read_bytes(4, rx, sizeof(rx), &rcvLen);
-
-            if (rc == ERR_NONE)
-            {
-              if ((!have_last_data) ||
-                  (rcvLen != APP_T2T_MAX_NDEF) ||
-                  (memcmp(last_data, rx, APP_T2T_MAX_NDEF) != 0))
-              {
-                char s[64];
-                snprintf(s, sizeof(s), "DATA CHANGED len=%u\r\n", (unsigned)rcvLen);
-                uart2_print(s);
-
-                uart2_print("RAW: ");
-                uart_hexln(rx, rcvLen);
-
-                t2t_print_ndef_text(rx, rcvLen);
-
-                memcpy(last_data, rx, APP_T2T_MAX_NDEF);
-                have_last_data = 1;
-              }
-            }
-          else
-          {
-            char s[80];
-            snprintf(s, sizeof(s), "READ ERROR rc=%d -> rediscover\r\n", (int)rc);
-            uart2_print(s);
-
-            tag_reported   = 0;
-            have_last_data = 0;
-
-            rfalNfcDeactivate(false);
-            rfalNfcDiscover(&discParam);
-          }
-        }
-      }
-    }
-    else
-    {
-      /* Tag weg oder noch nicht aktiviert */
-      if (tag_reported)
-      {
-        uart2_print("TAG LOST -> rediscover\r\n");
-        tag_reported   = 0;
-        have_last_data = 0;
-
-        rfalNfcDeactivate(false);
-        rfalNfcDiscover(&discParam);
-      }
+      default:
+        appStartDiscover();
+        break;
     }
   }
 
