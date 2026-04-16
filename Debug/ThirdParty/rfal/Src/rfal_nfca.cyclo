@@ -7,7 +7,7 @@
 ../ThirdParty/rfal/Src/rfal_nfca.c:564:12:rfalNfcaPollerStartTechnologyDetection	5
 ../ThirdParty/rfal/Src/rfal_nfca.c:582:12:rfalNfcaPollerGetTechnologyDetectionStatus	4
 ../ThirdParty/rfal/Src/rfal_nfca.c:597:12:rfalNfcaPollerSingleCollisionResolution	3
-../ThirdParty/rfal/Src/rfal_nfca.c:609:12:rfalNfcaPollerStartFullCollisionResolution	15
+../ThirdParty/rfal/Src/rfal_nfca.c:609:12:rfalNfcaPollerStartFullCollisionResolution	20
 ../ThirdParty/rfal/Src/rfal_nfca.c:694:12:rfalNfcaPollerGetFullCollisionResolutionStatus	18
 ../ThirdParty/rfal/Src/rfal_nfca.c:795:12:rfalNfcaPollerFullCollisionResolution	3
 ../ThirdParty/rfal/Src/rfal_nfca.c:805:12:rfalNfcaPollerSleepFullCollisionResolution	9

@@ -1,0 +1,4 @@
+../ThirdParty/rfal/Src/rfal_t1t.c:110:12:rfalT1TPollerInitialize	24	static
+../ThirdParty/rfal/Src/rfal_t1t.c:126:12:rfalT1TPollerRid	56	static
+../ThirdParty/rfal/Src/rfal_t1t.c:154:12:rfalT1TPollerRall	56	static
+../ThirdParty/rfal/Src/rfal_t1t.c:173:12:rfalT1TPollerWrite	72	static

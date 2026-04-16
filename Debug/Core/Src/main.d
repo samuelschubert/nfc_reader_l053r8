@@ -43,7 +43,9 @@ Core/Src/main.o: ../Core/Src/main.c ../Core/Inc/main.h \
  C:/repos/nfc_reader_l053r8/nfc_reader_l053r8/ThirdParty/rfal/Inc/rfal_nfcDep.h \
  C:/repos/nfc_reader_l053r8/nfc_reader_l053r8/ThirdParty/rfal/Inc/rfal_isoDep.h \
  C:/repos/nfc_reader_l053r8/nfc_reader_l053r8/ThirdParty/rfal/Inc/rfal_rf.h \
- ../Core/Inc/st_errno.h
+ ../Core/Inc/st_errno.h \
+ C:/repos/nfc_reader_l053r8/nfc_reader_l053r8/ThirdParty/rfal/Inc/rfal_nfca.h \
+ C:/repos/nfc_reader_l053r8/nfc_reader_l053r8/ThirdParty/rfal/Inc/rfal_t2t.h
 ../Core/Inc/main.h:
 ../Drivers/STM32L0xx_HAL_Driver/Inc/stm32l0xx_hal.h:
 ../Core/Inc/stm32l0xx_hal_conf.h:
@@ -92,3 +94,5 @@ C:/repos/nfc_reader_l053r8/nfc_reader_l053r8/ThirdParty/rfal/Inc/rfal_nfcDep.h:
 C:/repos/nfc_reader_l053r8/nfc_reader_l053r8/ThirdParty/rfal/Inc/rfal_isoDep.h:
 C:/repos/nfc_reader_l053r8/nfc_reader_l053r8/ThirdParty/rfal/Inc/rfal_rf.h:
 ../Core/Inc/st_errno.h:
+C:/repos/nfc_reader_l053r8/nfc_reader_l053r8/ThirdParty/rfal/Inc/rfal_nfca.h:
+C:/repos/nfc_reader_l053r8/nfc_reader_l053r8/ThirdParty/rfal/Inc/rfal_t2t.h:

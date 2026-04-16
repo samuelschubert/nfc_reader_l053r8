@@ -148,7 +148,6 @@ typedef struct
 #endif /* RFAL_FEATURE_T1T */
     bool                     isSleep;  							  /*!< Device sleeping flag                                                       */
 
-    struct { uint8_t uid[10]; } ridRes;
   } rfalNfcaListenDevice;
 
 /*

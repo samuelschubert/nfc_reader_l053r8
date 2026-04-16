@@ -19,6 +19,18 @@
 #define RFAL_FEATURE_NFCA  1
 #endif
 
+#ifndef RFAL_FEATURE_T1T
+#define RFAL_FEATURE_T1T   1
+#endif
+
+#ifndef RFAL_FEATURE_T2T
+#define RFAL_FEATURE_T2T   1
+#endif
+
+#ifndef RFAL_FEATURE_T4T
+#define RFAL_FEATURE_T4T   1
+#endif
+
 #ifndef RFAL_FEATURE_NFCB
 #define RFAL_FEATURE_NFCB  1
 #endif

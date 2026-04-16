@@ -30,6 +30,8 @@
 #include <stdio.h>
 #include "rfal_rf.h"
 #include "st_errno.h"
+#include "rfal_nfca.h"
+#include "rfal_t2t.h"
 
 /* USER CODE END Includes */
 
@@ -74,44 +76,16 @@ static void uart2_print(const char *s)
   HAL_UART_Transmit(&huart2, (uint8_t*)s, (uint16_t)strlen(s), 1000);
 }
 
-static void print_hex(const uint8_t *b, uint8_t len)
+static void uart_hexln(const uint8_t *b, uint16_t len)
 {
-  char t[4];
-  for(uint8_t i=0; i<len; i++){
-    snprintf(t, sizeof(t), "%02X", b[i]);
+  char t[5];
+  for (uint16_t i = 0; i < len; i++) {
+    snprintf(t, sizeof(t), "%02X ", b[i]);
     uart2_print(t);
   }
-}
-static uint8_t st25r300_read_reg(uint8_t reg) {
-	uint8_t tx[2] = { (uint8_t) (0x80u | (reg & 0x7Fu)), 0x00 };
-	uint8_t rx[2] = { 0x00, 0x00 };
-
-	HAL_GPIO_WritePin(GPIOB, GPIO_PIN_6, GPIO_PIN_RESET);      // CS low
-	HAL_SPI_TransmitReceive(&hspi1, tx, rx, 2, HAL_MAX_DELAY);
-	HAL_GPIO_WritePin(GPIOB, GPIO_PIN_6, GPIO_PIN_SET);
-	return rx[1];
+  uart2_print("\r\n");
 }
 
-static void st25r300_write_reg(uint8_t reg, uint8_t val) {
-	uint8_t tx[2] = { (uint8_t) (reg & 0x7Fu), val }; // MSB=0 => write
-	HAL_GPIO_WritePin(GPIOB, GPIO_PIN_6, GPIO_PIN_RESET);
-	HAL_SPI_Transmit(&hspi1, tx, 2, HAL_MAX_DELAY);
-	HAL_GPIO_WritePin(GPIOB, GPIO_PIN_6, GPIO_PIN_SET);
-}
-
-static void uart_print(const char *s)
-{
-  HAL_UART_Transmit(&huart2, (uint8_t*)s, (uint16_t)strlen(s), 1000);
-}
-
-static void uart_hex(const uint8_t *b, uint8_t len)
-{
-  char t[4];
-  for(uint8_t i=0; i<len; i++){
-    snprintf(t, sizeof(t), "%02X", b[i]);
-    uart_print(t);
-  }
-}
 /* USER CODE END 0 */
 
 /**
@@ -193,6 +167,10 @@ int main(void)
 
     static uint32_t last_ms = 0;
     static uint32_t last_irq = 0;
+    static uint8_t  tag_reported = 0;
+    static uint32_t last_read_ms = 0;
+
+    rfalNfcState state = rfalNfcGetState();
 
     if (HAL_GetTick() - last_ms > 1000)
     {
@@ -208,9 +186,72 @@ int main(void)
         (unsigned long)(st25r_irq_cnt - last_irq),
         (int)p0, (int)p1,
         (unsigned)devCnt,
-        (int)rfalNfcGetState());
+        (int)state);
       last_irq = st25r_irq_cnt;
       uart2_print(s);
+    }
+
+    if ((devCnt > 0) && (state == RFAL_NFC_STATE_ACTIVATED))
+    {
+        rfalNfcDevice *dev = &devList[0];
+
+        if (!tag_reported)
+        {
+            char s[160];
+
+            snprintf(s, sizeof(s),
+              "TAG FOUND: type=%u rfIf=%u uidLen=%u\r\n",
+              (unsigned)dev->type,
+              (unsigned)dev->rfInterface,
+              (unsigned)dev->nfcidLen);
+            uart2_print(s);
+
+            uart2_print("UID: ");
+            uart_hexln(dev->nfcid, dev->nfcidLen);
+
+            if (dev->type == RFAL_NFC_LISTEN_TYPE_NFCA)
+            {
+                snprintf(s, sizeof(s),
+                  "NFCA subtype=%u SAK=0x%02X\r\n",
+                  (unsigned)dev->dev.nfca.type,
+                  (unsigned)dev->dev.nfca.selRes.sak);
+                uart2_print(s);
+            }
+
+            tag_reported = 1;
+        }
+
+        if ((HAL_GetTick() - last_read_ms) >= 100)
+        {
+            last_read_ms = HAL_GetTick();
+
+            if ((dev->type == RFAL_NFC_LISTEN_TYPE_NFCA) &&
+                (dev->dev.nfca.type == RFAL_NFCA_T2T))
+            {
+                uint8_t rx[RFAL_T2T_READ_DATA_LEN];
+                uint16_t rcvLen = 0;
+                ReturnCode rc;
+
+                rc = rfalT2TPollerRead(4, rx, sizeof(rx), &rcvLen);
+
+                char s[80];
+                snprintf(s, sizeof(s),
+                  "T2T read rc=%d len=%u\r\n",
+                  (int)rc,
+                  (unsigned)rcvLen);
+                uart2_print(s);
+
+                if (rc == ERR_NONE)
+                {
+                    uart2_print("DATA: ");
+                    uart_hexln(rx, rcvLen);
+                }
+            }
+        }
+    }
+    else
+    {
+        tag_reported = 0;
     }
   }
 
