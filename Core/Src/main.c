@@ -51,11 +51,17 @@ typedef enum
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 
-/* Private define ------------------------------------------------------------*/
-/* USER CODE BEGIN PD */
+#define DEBUG_LOG              0
+U
 
-#define APP_T2T_CHUNK_LEN   RFAL_T2T_READ_DATA_LEN
-#define APP_T2T_MAX_NDEF    128U
+#define APP_T2T_CHUNK_LEN      RFAL_T2T_READ_DATA_LEN   /* 16 Byte */
+#define APP_T2T_START_PAGE     4U
+#define APP_RAW_READ_LEN       112U                     /* 7x 16 Byte */
+#define APP_PAYLOAD_LEN        100U
+#define APP_STREAM_INTERVAL_MS 10U
+
+#define APP_FRAME_SYNC1        0xAA
+#define APP_FRAME_SYNC2        0x55
 
 /* USER CODE END PD */
 
@@ -75,8 +81,9 @@ volatile uint32_t st25r_irq_cnt = 0;
 static AppState_t appState = APP_STATE_DISCOVER;
 static rfalNfcDiscoverParam discParam;
 
-static uint8_t  have_last_data = 0;
-static uint8_t  last_data[APP_T2T_MAX_NDEF];
+static uint8_t  last_payload[APP_PAYLOAD_LEN];
+static uint8_t  have_last_payload = 0;
+static uint16_t frame_seq = 0;
 
 static uint32_t last_status_ms = 0;
 static uint32_t last_read_ms   = 0;
@@ -98,19 +105,81 @@ static void appProcessCurrentTagData(rfalNfcDevice *dev, const uint8_t *buf, uin
 
 
 
-static void uart2_print(const char *s)
+static void uart2_tx(const uint8_t *buf, uint16_t len)
 {
-  HAL_UART_Transmit(&huart2, (uint8_t*)s, (uint16_t)strlen(s), 1000);
+  HAL_UART_Transmit(&huart2, (uint8_t*)buf, len, 1000);
 }
 
-static void uart_hexln(const uint8_t *b, uint16_t len)
+static void dbg_print(const char *s)
 {
+#if DEBUG_LOG
+  HAL_UART_Transmit(&huart2, (uint8_t*)s, (uint16_t)strlen(s), 1000);
+#else
+  (void)s;
+#endif
+}
+
+static void dbg_hexln(const uint8_t *b, uint16_t len)
+{
+#if DEBUG_LOG
   char t[5];
   for (uint16_t i = 0; i < len; i++) {
     snprintf(t, sizeof(t), "%02X ", b[i]);
-    uart2_print(t);
+    dbg_print(t);
   }
-  uart2_print("\r\n");
+  dbg_print("\r\n");
+#else
+  (void)b;
+  (void)len;
+#endif
+}
+
+static uint16_t app_crc16_ccitt(const uint8_t *data, uint16_t len)
+{
+  uint16_t crc = 0xFFFF;
+
+  for (uint16_t i = 0; i < len; i++)
+  {
+    crc ^= ((uint16_t)data[i] << 8);
+    for (uint8_t j = 0; j < 8; j++)
+    {
+      if ((crc & 0x8000U) != 0U)
+      {
+        crc = (uint16_t)((crc << 1) ^ 0x1021U);
+      }
+      else
+      {
+        crc <<= 1;
+      }
+    }
+  }
+  return crc;
+}
+
+static void pcSendFrame(const uint8_t *payload, uint16_t len)
+{
+  uint8_t frame[2 + 2 + 2 + APP_PAYLOAD_LEN + 2];
+  uint16_t idx = 0;
+  uint16_t crc;
+
+  frame[idx++] = APP_FRAME_SYNC1;
+  frame[idx++] = APP_FRAME_SYNC2;
+
+  frame[idx++] = (uint8_t)(frame_seq & 0xFFU);
+  frame[idx++] = (uint8_t)((frame_seq >> 8) & 0xFFU);
+
+  frame[idx++] = (uint8_t)(len & 0xFFU);
+  frame[idx++] = (uint8_t)((len >> 8) & 0xFFU);
+
+  memcpy(&frame[idx], payload, len);
+  idx += len;
+
+  crc = app_crc16_ccitt(frame, idx);
+  frame[idx++] = (uint8_t)(crc & 0xFFU);
+  frame[idx++] = (uint8_t)((crc >> 8) & 0xFFU);
+
+  uart2_tx(frame, idx);
+  frame_seq++;
 }
 
 static ReturnCode t2t_read_bytes(uint8_t startPage, uint8_t *dst, uint16_t wantLen, uint16_t *outLen)
@@ -137,187 +206,30 @@ static ReturnCode t2t_read_bytes(uint8_t startPage, uint8_t *dst, uint16_t wantL
       return ERR_REQUEST;
     }
 
-    uint16_t copyLen = ((wantLen - total) > APP_T2T_CHUNK_LEN) ? APP_T2T_CHUNK_LEN : (wantLen - total);
-    memcpy(&dst[total], rx, copyLen);
-    total += copyLen;
+    {
+      uint16_t copyLen = ((wantLen - total) > APP_T2T_CHUNK_LEN) ? APP_T2T_CHUNK_LEN : (wantLen - total);
+      memcpy(&dst[total], rx, copyLen);
+      total += copyLen;
+    }
 
-    page += 4;   /* READ(page) liest 4 Pages = 16 Byte */
+    page += 4U;   /* READ(page) liest 4 Pages = 16 Byte */
   }
 
   *outLen = total;
   return ERR_NONE;
 }
 
-static void t2t_print_ndef_text(const uint8_t *buf, uint16_t len)
-{
-  char s[96];
-  uint16_t i = 0;
-
-  while (i < len)
-  {
-    uint8_t tlv = buf[i];
-
-    if (tlv == 0x00)
-    {
-      i++;
-      continue;
-    }
-
-    if (tlv == 0xFE)
-    {
-      uart2_print("NDEF: terminator reached, no record\r\n");
-      return;
-    }
-
-    if (tlv != 0x03)
-    {
-      snprintf(s, sizeof(s), "NDEF: unsupported TLV 0x%02X\r\n", tlv);
-      uart2_print(s);
-      return;
-    }
-
-    break;
-  }
-
-  if (i + 1 >= len)
-  {
-    uart2_print("NDEF: TLV too short\r\n");
-    return;
-  }
-
-  uint16_t ndefLen = 0;
-  uint16_t ndefStart = 0;
-
-  if (buf[i + 1] == 0xFF)
-  {
-    if (i + 3 >= len)
-    {
-      uart2_print("NDEF: extended length header incomplete\r\n");
-      return;
-    }
-    ndefLen = ((uint16_t)buf[i + 2] << 8) | buf[i + 3];
-    ndefStart = i + 4;
-  }
-  else
-  {
-    ndefLen = buf[i + 1];
-    ndefStart = i + 2;
-  }
-
-  snprintf(s, sizeof(s), "NDEF length=%u\r\n", (unsigned)ndefLen);
-  uart2_print(s);
-
-  if ((ndefStart + ndefLen) > len)
-  {
-    uart2_print("NDEF: buffer too small for full message\r\n");
-    return;
-  }
-
-  if (ndefLen < 5)
-  {
-    uart2_print("NDEF: record too short\r\n");
-    return;
-  }
-
-  const uint8_t *rec = &buf[ndefStart];
-
-  uint8_t hdr = rec[0];
-  uint8_t typeLen = rec[1];
-  uint32_t payloadLen = 0;
-  uint16_t pos = 2;
-
-  if (hdr & 0x10)
-  {
-    payloadLen = rec[pos];
-    pos += 1;
-  }
-  else
-  {
-    payloadLen = ((uint32_t)rec[pos] << 24) |
-                 ((uint32_t)rec[pos + 1] << 16) |
-                 ((uint32_t)rec[pos + 2] << 8) |
-                 ((uint32_t)rec[pos + 3]);
-    pos += 4;
-  }
-
-  uint8_t idLen = 0;
-  if (hdr & 0x08)
-  {
-    idLen = rec[pos];
-    pos += 1;
-  }
-
-  if ((pos + typeLen + idLen + payloadLen) > ndefLen)
-  {
-    uart2_print("NDEF: malformed record\r\n");
-    return;
-  }
-
-  const uint8_t *typeField = &rec[pos];
-  pos += typeLen;
-  pos += idLen;
-
-  const uint8_t *payload = &rec[pos];
-
-  snprintf(s, sizeof(s),
-           "NDEF rec hdr=0x%02X typeLen=%u payloadLen=%lu\r\n",
-           hdr, typeLen, (unsigned long)payloadLen);
-  uart2_print(s);
-
-  if ((typeLen == 1) && (typeField[0] == 'T'))
-  {
-    if (payloadLen < 1)
-    {
-      uart2_print("TEXT: payload too short\r\n");
-      return;
-    }
-
-    uint8_t status = payload[0];
-    uint8_t langLen = status & 0x3F;
-    uint8_t utf16 = (status & 0x80) ? 1U : 0U;
-
-    if (payloadLen < (uint32_t)(1U + langLen))
-    {
-      uart2_print("TEXT: invalid language length\r\n");
-      return;
-    }
-
-    snprintf(s, sizeof(s), "TEXT encoding=%s lang=", utf16 ? "UTF16" : "UTF8");
-    uart2_print(s);
-
-    for (uint8_t k = 0; k < langLen; k++)
-    {
-      char c[2] = { (char)payload[1 + k], 0 };
-      uart2_print(c);
-    }
-    uart2_print("\r\n");
-
-    uint32_t textLen = payloadLen - 1U - langLen;
-    uart2_print("TEXT: ");
-
-    for (uint32_t k = 0; k < textLen; k++)
-    {
-      char c[2] = { (char)payload[1U + langLen + k], 0 };
-      uart2_print(c);
-    }
-    uart2_print("\r\n");
-  }
-  else
-  {
-    uart2_print("NDEF: first record is not a Text record\r\n");
-  }
-}
-
 static void appLogHeartbeat(uint8_t devCnt, rfalNfcState state)
 {
+#if DEBUG_LOG
   if ((HAL_GetTick() - last_status_ms) >= 1000U)
   {
-    last_status_ms = HAL_GetTick();
-
+    char s[140];
     GPIO_PinState p0 = HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_0);
     GPIO_PinState p1 = HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_1);
 
-    char s[140];
+    last_status_ms = HAL_GetTick();
+
     snprintf(s, sizeof(s),
       "APP=%u cb=%lu last=0x%04X irq/s=%lu PA0=%d PA1=%d devCnt=%u state=%d\r\n",
       (unsigned)appState,
@@ -329,12 +241,17 @@ static void appLogHeartbeat(uint8_t devCnt, rfalNfcState state)
       (int)state);
 
     last_irq = st25r_irq_cnt;
-    uart2_print(s);
+    dbg_print(s);
   }
+#else
+  (void)devCnt;
+  (void)state;
+#endif
 }
 
 static void appReportTag(rfalNfcDevice *dev)
 {
+#if DEBUG_LOG
   char s[160];
 
   snprintf(s, sizeof(s),
@@ -342,10 +259,10 @@ static void appReportTag(rfalNfcDevice *dev)
     (unsigned)dev->type,
     (unsigned)dev->rfInterface,
     (unsigned)dev->nfcidLen);
-  uart2_print(s);
+  dbg_print(s);
 
-  uart2_print("UID: ");
-  uart_hexln(dev->nfcid, dev->nfcidLen);
+  dbg_print("UID: ");
+  dbg_hexln(dev->nfcid, dev->nfcidLen);
 
   if (dev->type == RFAL_NFC_LISTEN_TYPE_NFCA)
   {
@@ -353,16 +270,25 @@ static void appReportTag(rfalNfcDevice *dev)
       "NFCA subtype=%u SAK=0x%02X\r\n",
       (unsigned)dev->dev.nfca.type,
       (unsigned)dev->dev.nfca.selRes.sak);
-    uart2_print(s);
+    dbg_print(s);
   }
+#else
+  (void)dev;
+#endif
 }
 
 static ReturnCode appReadCurrentTag(rfalNfcDevice *dev, uint8_t *buf, uint16_t bufSize, uint16_t *outLen)
 {
+  if (bufSize < APP_RAW_READ_LEN)
+  {
+    *outLen = 0;
+    return ERR_PARAM;
+  }
+
   if ((dev->type == RFAL_NFC_LISTEN_TYPE_NFCA) &&
       (dev->dev.nfca.type == RFAL_NFCA_T2T))
   {
-    return t2t_read_bytes(4, buf, bufSize, outLen);
+    return t2t_read_bytes(APP_T2T_START_PAGE, buf, APP_RAW_READ_LEN, outLen);
   }
 
   *outLen = 0;
@@ -371,32 +297,55 @@ static ReturnCode appReadCurrentTag(rfalNfcDevice *dev, uint8_t *buf, uint16_t b
 
 static void appProcessCurrentTagData(rfalNfcDevice *dev, const uint8_t *buf, uint16_t len)
 {
-  if ((dev->type == RFAL_NFC_LISTEN_TYPE_NFCA) &&
-      (dev->dev.nfca.type == RFAL_NFCA_T2T))
+  uint8_t payload[APP_PAYLOAD_LEN];
+
+  (void)dev;
+
+  if (len < APP_PAYLOAD_LEN)
   {
-    uart2_print("RAW: ");
-    uart_hexln(buf, len);
-    t2t_print_ndef_text(buf, len);
+#if DEBUG_LOG
+    dbg_print("RAW buffer shorter than 100 bytes\r\n");
+#endif
     return;
   }
 
-  uart2_print("Unknown tag data format\r\n");
+  memcpy(payload, buf, APP_PAYLOAD_LEN);
+  pcSendFrame(payload, APP_PAYLOAD_LEN);
+
+#if DEBUG_LOG
+  if ((!have_last_payload) || (memcmp(last_payload, payload, APP_PAYLOAD_LEN) != 0))
+  {
+    dbg_print("PAYLOAD CHANGED\r\n");
+    dbg_hexln(payload, APP_PAYLOAD_LEN);
+    memcpy(last_payload, payload, APP_PAYLOAD_LEN);
+    have_last_payload = 1;
+  }
+#endif
 }
 
 static void appStartDiscover(void)
 {
   ReturnCode err;
+#if DEBUG_LOG
   char s[64];
+#endif
 
-  have_last_data = 0;
+  have_last_payload = 0;
 
   err = rfalNfcDeactivate(false);
-  snprintf(s, sizeof(s), "rfalNfcDeactivate err=%d\r\n", (int)err);
-  uart2_print(s);
+#if DEBUG_LOG
+  if ((int)err != 33)   /* wrong state on first startup is harmless in this project */
+  {
+    snprintf(s, sizeof(s), "rfalNfcDeactivate err=%d\r\n", (int)err);
+    dbg_print(s);
+  }
+#endif
 
   err = rfalNfcDiscover(&discParam);
+#if DEBUG_LOG
   snprintf(s, sizeof(s), "rfalNfcDiscover err=%d\r\n", (int)err);
-  uart2_print(s);
+  dbg_print(s);
+#endif
 
   appState = APP_STATE_DISCOVER;
 }
@@ -413,9 +362,9 @@ static void appHandleDiscover(void)
   if ((devCnt > 0U) && (state == RFAL_NFC_STATE_ACTIVATED))
   {
     appReportTag(&devList[0]);
-    have_last_data = 0;
-    last_read_ms   = HAL_GetTick();
-    appState       = APP_STATE_ACTIVE_READ;
+    have_last_payload = 0;
+    last_read_ms = HAL_GetTick();
+    appState = APP_STATE_ACTIVE_READ;
   }
 }
 
@@ -424,51 +373,44 @@ static void appHandleActiveRead(void)
   rfalNfcDevice *devList = NULL;
   uint8_t devCnt = 0;
   rfalNfcState state = rfalNfcGetState();
+  uint8_t rx[APP_RAW_READ_LEN];
+  uint16_t rcvLen = 0;
+  ReturnCode rc;
+  rfalNfcDevice *dev;
 
   rfalNfcGetDevicesFound(&devList, &devCnt);
   appLogHeartbeat(devCnt, state);
 
   if ((devCnt == 0U) || (state != RFAL_NFC_STATE_ACTIVATED))
   {
-    uart2_print("TAG LOST -> rediscover\r\n");
+#if DEBUG_LOG
+    dbg_print("TAG LOST -> rediscover\r\n");
+#endif
     appStartDiscover();
     return;
   }
 
-  if ((HAL_GetTick() - last_read_ms) < 10U)
+  if ((HAL_GetTick() - last_read_ms) < APP_STREAM_INTERVAL_MS)
   {
     return;
   }
   last_read_ms = HAL_GetTick();
 
-  rfalNfcDevice *dev = &devList[0];
-  uint8_t rx[APP_T2T_MAX_NDEF];
-  uint16_t rcvLen = 0;
-  ReturnCode rc;
-
+  dev = &devList[0];
   rc = appReadCurrentTag(dev, rx, sizeof(rx), &rcvLen);
 
   if (rc != ERR_NONE)
   {
+#if DEBUG_LOG
     char s[80];
     snprintf(s, sizeof(s), "READ ERROR rc=%d -> rediscover\r\n", (int)rc);
-    uart2_print(s);
+    dbg_print(s);
+#endif
     appStartDiscover();
     return;
   }
 
-  if ((!have_last_data) ||
-      (memcmp(last_data, rx, APP_T2T_MAX_NDEF) != 0))
-  {
-    char s[64];
-    snprintf(s, sizeof(s), "DATA CHANGED len=%u\r\n", (unsigned)rcvLen);
-    uart2_print(s);
-
-    appProcessCurrentTagData(dev, rx, rcvLen);
-
-    memcpy(last_data, rx, APP_T2T_MAX_NDEF);
-    have_last_data = 1;
-  }
+  appProcessCurrentTagData(dev, rx, rcvLen);
 }
 
 /* USER CODE END 0 */
@@ -506,27 +448,27 @@ int main(void)
   MX_SPI1_Init();
   /* USER CODE BEGIN 2 */
 
-  uart2_print("UART OK\r\n");
+  dbg_print("UART OK\r\n");
   platformResetST25R();
-  uart2_print("Reset done\r\n");
+  dbg_print("Reset done\r\n");
 
   ReturnCode err;
   char b[48];
 
   err = rfalInitialize();
   snprintf(b, sizeof(b), "rfalInitialize err=%d\r\n", (int)err);
-  uart2_print(b);
+  dbg_print(b);
   if (err != ERR_NONE) Error_Handler();
 
   err = rfalNfcInitialize();
   snprintf(b, sizeof(b), "rfalNfcInitialize err=%d\r\n", (int)err);
-  uart2_print(b);
+  dbg_print(b);
   if (err != ERR_NONE) Error_Handler();
 
   memset(&discParam, 0, sizeof(discParam));
   discParam.compMode      = RFAL_COMPLIANCE_MODE_NFC;
   discParam.devLimit      = 1;
-  discParam.techs2Find    = RFAL_NFC_POLL_TECH_A | RFAL_NFC_POLL_TECH_V;
+  discParam.techs2Find    = RFAL_NFC_POLL_TECH_A;
   discParam.totalDuration = 3000;
 
   appStartDiscover();
