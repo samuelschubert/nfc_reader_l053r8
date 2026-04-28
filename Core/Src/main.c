@@ -51,13 +51,12 @@ typedef enum
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 
-#define DEBUG_LOG              0
-U
+#define DEBUG_LOG              1U
 
 #define APP_T2T_CHUNK_LEN      RFAL_T2T_READ_DATA_LEN   /* 16 Byte */
 #define APP_T2T_START_PAGE     4U
-#define APP_RAW_READ_LEN       112U                     /* 7x 16 Byte */
-#define APP_PAYLOAD_LEN        100U
+#define APP_RAW_READ_LEN       16U                     /* 7x 16 Byte */
+#define APP_PAYLOAD_LEN        16U
 #define APP_STREAM_INTERVAL_MS 10U
 
 #define APP_FRAME_SYNC1        0xAA
@@ -88,6 +87,17 @@ static uint16_t frame_seq = 0;
 static uint32_t last_status_ms = 0;
 static uint32_t last_read_ms   = 0;
 static uint32_t last_irq       = 0;
+
+static uint32_t stat_last_ms = 0;
+static uint32_t read_ok_cnt = 0;
+static uint32_t read_err_cnt = 0;
+static uint32_t read_overrun_cnt = 0;
+
+static uint32_t read_us_last = 0;
+static uint32_t read_us_min = 0xFFFFFFFFU;
+static uint32_t read_us_max = 0U;
+
+static uint16_t last_crc16 = 0;
 
 /* USER CODE END PV */
 
@@ -222,26 +232,27 @@ static ReturnCode t2t_read_bytes(uint8_t startPage, uint8_t *dst, uint16_t wantL
 static void appLogHeartbeat(uint8_t devCnt, rfalNfcState state)
 {
 #if DEBUG_LOG
-  if ((HAL_GetTick() - last_status_ms) >= 1000U)
+  if ((HAL_GetTick() - stat_last_ms) >= 1000U)
   {
-    char s[140];
-    GPIO_PinState p0 = HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_0);
-    GPIO_PinState p1 = HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_1);
+    char s[200];
 
-    last_status_ms = HAL_GetTick();
+    stat_last_ms = HAL_GetTick();
 
     snprintf(s, sizeof(s),
-      "APP=%u cb=%lu last=0x%04X irq/s=%lu PA0=%d PA1=%d devCnt=%u state=%d\r\n",
+      "APP=%u reads/s=%lu err/s=%lu ov/s=%lu last_ms=%lu crc=0x%04X devCnt=%u state=%d\r\n",
       (unsigned)appState,
-      (unsigned long)exti_cb_cnt,
-      (unsigned)last_exti_pin,
-      (unsigned long)(st25r_irq_cnt - last_irq),
-      (int)p0, (int)p1,
+      (unsigned long)read_ok_cnt,
+      (unsigned long)read_err_cnt,
+      (unsigned long)read_overrun_cnt,
+      (unsigned long)read_us_last,
+      (unsigned)last_crc16,
       (unsigned)devCnt,
       (int)state);
-
-    last_irq = st25r_irq_cnt;
     dbg_print(s);
+
+    read_ok_cnt = 0;
+    read_err_cnt = 0;
+    read_overrun_cnt = 0;
   }
 #else
   (void)devCnt;
@@ -310,7 +321,8 @@ static void appProcessCurrentTagData(rfalNfcDevice *dev, const uint8_t *buf, uin
   }
 
   memcpy(payload, buf, APP_PAYLOAD_LEN);
-  pcSendFrame(payload, APP_PAYLOAD_LEN);
+  last_crc16 = app_crc16_ccitt(payload, APP_PAYLOAD_LEN);
+  //pcSendFrame(payload, APP_PAYLOAD_LEN);
 
 #if DEBUG_LOG
   if ((!have_last_payload) || (memcmp(last_payload, payload, APP_PAYLOAD_LEN) != 0))
@@ -377,6 +389,8 @@ static void appHandleActiveRead(void)
   uint16_t rcvLen = 0;
   ReturnCode rc;
   rfalNfcDevice *dev;
+  uint32_t now;
+  uint32_t dt;
 
   rfalNfcGetDevicesFound(&devList, &devCnt);
   appLogHeartbeat(devCnt, state);
@@ -390,26 +404,40 @@ static void appHandleActiveRead(void)
     return;
   }
 
-  if ((HAL_GetTick() - last_read_ms) < APP_STREAM_INTERVAL_MS)
+  now = HAL_GetTick();
+  dt  = now - last_read_ms;
+
+  if (dt < APP_STREAM_INTERVAL_MS)
   {
     return;
   }
-  last_read_ms = HAL_GetTick();
+
+  if (dt >= (2U * APP_STREAM_INTERVAL_MS))
+  {
+    read_overrun_cnt++;
+  }
+
+  last_read_ms = now;
+  read_us_last = dt;   /* aktuell in ms, nicht in us */
 
   dev = &devList[0];
   rc = appReadCurrentTag(dev, rx, sizeof(rx), &rcvLen);
 
   if (rc != ERR_NONE)
   {
+    read_err_cnt++;
 #if DEBUG_LOG
-    char s[80];
-    snprintf(s, sizeof(s), "READ ERROR rc=%d -> rediscover\r\n", (int)rc);
-    dbg_print(s);
+    {
+      char s[80];
+      snprintf(s, sizeof(s), "READ ERROR rc=%d -> rediscover\r\n", (int)rc);
+      dbg_print(s);
+    }
 #endif
     appStartDiscover();
     return;
   }
 
+  read_ok_cnt++;
   appProcessCurrentTagData(dev, rx, rcvLen);
 }
 
