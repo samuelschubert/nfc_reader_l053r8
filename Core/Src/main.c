@@ -62,6 +62,12 @@ typedef enum
 #define APP_FRAME_SYNC1        0xAA
 #define APP_FRAME_SYNC2        0x55
 
+#define APP_USE_T2T_FAST_READ   1U
+
+#define APP_T2T_CMD_FAST_READ   0x3AU
+#define APP_T2T_PAGE_LEN        4U
+#define APP_T2T_FAST_FWT        rfalConvMsTo1fc(6U)
+
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -92,6 +98,7 @@ static uint32_t stat_last_ms = 0;
 static uint32_t read_ok_cnt = 0;
 static uint32_t read_err_cnt = 0;
 static uint32_t read_overrun_cnt = 0;
+static uint32_t payload_change_cnt = 0;
 
 static uint32_t read_us_last = 0;
 static uint32_t read_us_min = 0xFFFFFFFFU;
@@ -192,6 +199,56 @@ static void pcSendFrame(const uint8_t *payload, uint16_t len)
   frame_seq++;
 }
 
+static ReturnCode t2t_fast_read_bytes(uint8_t startPage, uint8_t *dst, uint16_t wantLen, uint16_t *outLen)
+{
+  ReturnCode rc;
+  uint8_t req[3];
+  uint8_t endPage;
+  uint16_t rcvLen = 0;
+  uint16_t pagesToRead;
+
+  if ((dst == NULL) || (outLen == NULL))
+  {
+    return ERR_PARAM;
+  }
+
+  if ((wantLen == 0U) || ((wantLen % APP_T2T_PAGE_LEN) != 0U))
+  {
+    *outLen = 0;
+    return ERR_PARAM;
+  }
+
+  pagesToRead = (uint16_t)(wantLen / APP_T2T_PAGE_LEN);
+  endPage = (uint8_t)(startPage + pagesToRead - 1U);
+
+  req[0] = APP_T2T_CMD_FAST_READ;
+  req[1] = startPage;
+  req[2] = endPage;
+
+  rc = rfalTransceiveBlockingTxRx(req,
+                                  sizeof(req),
+                                  dst,
+                                  wantLen,
+                                  &rcvLen,
+                                  RFAL_TXRX_FLAGS_DEFAULT,
+                                  APP_T2T_FAST_FWT);
+
+  if (rc != ERR_NONE)
+  {
+    *outLen = rcvLen;
+    return rc;
+  }
+
+  if (rcvLen != wantLen)
+  {
+    *outLen = rcvLen;
+    return ERR_REQUEST;
+  }
+
+  *outLen = rcvLen;
+  return ERR_NONE;
+}
+
 static ReturnCode t2t_read_bytes(uint8_t startPage, uint8_t *dst, uint16_t wantLen, uint16_t *outLen)
 {
   ReturnCode rc;
@@ -234,16 +291,17 @@ static void appLogHeartbeat(uint8_t devCnt, rfalNfcState state)
 #if DEBUG_LOG
   if ((HAL_GetTick() - stat_last_ms) >= 1000U)
   {
-    char s[200];
+    char s[220];
 
     stat_last_ms = HAL_GetTick();
 
     snprintf(s, sizeof(s),
-      "APP=%u reads/s=%lu err/s=%lu ov/s=%lu last_ms=%lu crc=0x%04X devCnt=%u state=%d\r\n",
+      "APP=%u reads/s=%lu err/s=%lu ov/s=%lu chg/s=%lu last_ms=%lu crc=0x%04X devCnt=%u state=%d\r\n",
       (unsigned)appState,
       (unsigned long)read_ok_cnt,
       (unsigned long)read_err_cnt,
       (unsigned long)read_overrun_cnt,
+      (unsigned long)payload_change_cnt,
       (unsigned long)read_us_last,
       (unsigned)last_crc16,
       (unsigned)devCnt,
@@ -253,6 +311,7 @@ static void appLogHeartbeat(uint8_t devCnt, rfalNfcState state)
     read_ok_cnt = 0;
     read_err_cnt = 0;
     read_overrun_cnt = 0;
+    payload_change_cnt = 0;
   }
 #else
   (void)devCnt;
@@ -290,20 +349,38 @@ static void appReportTag(rfalNfcDevice *dev)
 
 static ReturnCode appReadCurrentTag(rfalNfcDevice *dev, uint8_t *buf, uint16_t bufSize, uint16_t *outLen)
 {
+  ReturnCode rc;
+
   if (bufSize < APP_RAW_READ_LEN)
   {
     *outLen = 0;
     return ERR_PARAM;
   }
 
-  if ((dev->type == RFAL_NFC_LISTEN_TYPE_NFCA) &&
-      (dev->dev.nfca.type == RFAL_NFCA_T2T))
+  if ((dev->type != RFAL_NFC_LISTEN_TYPE_NFCA) ||
+      (dev->dev.nfca.type != RFAL_NFCA_T2T))
   {
-    return t2t_read_bytes(APP_T2T_START_PAGE, buf, APP_RAW_READ_LEN, outLen);
+    *outLen = 0;
+    return ERR_REQUEST;
   }
 
-  *outLen = 0;
-  return ERR_REQUEST;
+#if APP_USE_T2T_FAST_READ
+  rc = t2t_fast_read_bytes(APP_T2T_START_PAGE, buf, APP_RAW_READ_LEN, outLen);
+  if (rc == ERR_NONE)
+  {
+    return ERR_NONE;
+  }
+
+#if DEBUG_LOG
+  {
+    char s[80];
+    snprintf(s, sizeof(s), "FAST_READ rc=%d -> fallback READ\r\n", (int)rc);
+    dbg_print(s);
+  }
+#endif
+#endif
+
+  return t2t_read_bytes(APP_T2T_START_PAGE, buf, APP_RAW_READ_LEN, outLen);
 }
 
 static void appProcessCurrentTagData(rfalNfcDevice *dev, const uint8_t *buf, uint16_t len)
@@ -314,25 +391,21 @@ static void appProcessCurrentTagData(rfalNfcDevice *dev, const uint8_t *buf, uin
 
   if (len < APP_PAYLOAD_LEN)
   {
-#if DEBUG_LOG
-    dbg_print("RAW buffer shorter than 100 bytes\r\n");
-#endif
     return;
   }
 
   memcpy(payload, buf, APP_PAYLOAD_LEN);
   last_crc16 = app_crc16_ccitt(payload, APP_PAYLOAD_LEN);
-  //pcSendFrame(payload, APP_PAYLOAD_LEN);
 
-#if DEBUG_LOG
   if ((!have_last_payload) || (memcmp(last_payload, payload, APP_PAYLOAD_LEN) != 0))
   {
-    dbg_print("PAYLOAD CHANGED\r\n");
-    dbg_hexln(payload, APP_PAYLOAD_LEN);
     memcpy(last_payload, payload, APP_PAYLOAD_LEN);
     have_last_payload = 1;
+    payload_change_cnt++;
   }
-#endif
+
+  /* Für reines Timing/Debug erstmal deaktiviert */
+  /* pcSendFrame(payload, APP_PAYLOAD_LEN); */
 }
 
 static void appStartDiscover(void)
