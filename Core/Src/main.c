@@ -19,6 +19,7 @@
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 #include "spi.h"
+#include "tim.h"
 #include "usart.h"
 #include "gpio.h"
 
@@ -34,6 +35,8 @@
 
 #include <string.h>
 #include <stdio.h>
+
+#include "tim.h"
 
 /* USER CODE END Includes */
 
@@ -51,22 +54,30 @@ typedef enum
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 
-#define DEBUG_LOG              1U
+#define DEBUG_LOG               1U
 
-#define APP_T2T_CHUNK_LEN      RFAL_T2T_READ_DATA_LEN   /* 16 Byte */
-#define APP_T2T_START_PAGE     4U
-#define APP_RAW_READ_LEN       16U                     /* 7x 16 Byte */
-#define APP_PAYLOAD_LEN        16U
-#define APP_STREAM_INTERVAL_MS 10U
+#define APP_MODE_LPC_TEST       1U
 
-#define APP_FRAME_SYNC1        0xAA
-#define APP_FRAME_SYNC2        0x55
-
-#define APP_USE_T2T_FAST_READ   1U
-
+#define APP_T2T_CHUNK_LEN       RFAL_T2T_READ_DATA_LEN
+#define APP_T2T_START_PAGE      4U
 #define APP_T2T_CMD_FAST_READ   0x3AU
 #define APP_T2T_PAGE_LEN        4U
 #define APP_T2T_FAST_FWT        rfalConvMsTo1fc(6U)
+#define APP_USE_T2T_FAST_READ   1U
+
+#define APP_STREAM_INTERVAL_US   ((uint32_t)APP_STREAM_INTERVAL_MS * 1000U)
+#define APP_DEADLINE_SLACK_US    500U
+#define APP_STAT_READ_WINDOW	 20U
+
+#if APP_MODE_LPC_TEST
+  #define APP_RAW_READ_LEN        100U
+  #define APP_PAYLOAD_LEN         100U
+  #define APP_STREAM_INTERVAL_MS  10U
+#else
+  #define APP_RAW_READ_LEN        100U
+  #define APP_PAYLOAD_LEN         100U
+  #define APP_STREAM_INTERVAL_MS  10U
+#endif
 
 /* USER CODE END PD */
 
@@ -86,30 +97,41 @@ volatile uint32_t st25r_irq_cnt = 0;
 static AppState_t appState = APP_STATE_DISCOVER;
 static rfalNfcDiscoverParam discParam;
 
-static uint8_t  last_payload[APP_PAYLOAD_LEN];
-static uint8_t  have_last_payload = 0;
-static uint16_t frame_seq = 0;
-
-static uint32_t last_status_ms = 0;
-static uint32_t last_read_ms   = 0;
-static uint32_t last_irq       = 0;
-
 static uint32_t stat_last_ms = 0;
 static uint32_t read_ok_cnt = 0;
 static uint32_t read_err_cnt = 0;
 static uint32_t read_overrun_cnt = 0;
 static uint32_t payload_change_cnt = 0;
+static uint32_t valid_frame_cnt = 0;
+static uint32_t invalid_frame_cnt = 0;
+static uint8_t stats_armed = 0;
 
 static uint32_t read_us_last = 0;
-static uint32_t read_us_min = 0xFFFFFFFFU;
-static uint32_t read_us_max = 0U;
-
 static uint16_t last_crc16 = 0;
+
+static uint32_t read_time_us_last = 0;
+static uint32_t read_time_us_min = 0xFFFFFFFFU;
+
+static uint32_t read_time_us_max = 0U;
+
+static uint32_t cycle_time_us_last = 0;
+static uint32_t cycle_time_us_min = 0xFFFFFFFFU;
+static uint32_t cycle_time_us_max = 0U;
+
+static uint16_t last_read_start_us = 0;
+static uint32_t missed_deadline_cnt = 0;
+static uint16_t last_cycle_mark_us = 0;
+
+static uint32_t stat_read_count = 0;
+static uint32_t stat_read_sum_us = 0;
+static uint32_t stat_cycle_sum_us = 0;
 
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
+
 void SystemClock_Config(void);
+
 /* USER CODE BEGIN PFP */
 
 static ReturnCode appReadCurrentTag(rfalNfcDevice *dev, uint8_t *buf, uint16_t bufSize, uint16_t *outLen);
@@ -120,11 +142,20 @@ static void appProcessCurrentTagData(rfalNfcDevice *dev, const uint8_t *buf, uin
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 
-
-
-static void uart2_tx(const uint8_t *buf, uint16_t len)
+static inline uint16_t timer_now_us(void)
 {
-  HAL_UART_Transmit(&huart2, (uint8_t*)buf, len, 1000);
+  return (uint16_t)__HAL_TIM_GET_COUNTER(&htim2);
+}
+
+static inline uint32_t timer_diff_us(uint16_t newer, uint16_t older)
+{
+  return (uint16_t)(newer - older);
+}
+
+static inline void stat_update_minmax(uint32_t v, uint32_t *minv, uint32_t *maxv)
+{
+  if (v < *minv) *minv = v;
+  if (v > *maxv) *maxv = v;
 }
 
 static void dbg_print(const char *s)
@@ -145,6 +176,7 @@ static void dbg_hexln(const uint8_t *b, uint16_t len)
     dbg_print(t);
   }
   dbg_print("\r\n");
+  dbg_print("BUILD: timing_v3_16B_10ms\r\n");
 #else
   (void)b;
   (void)len;
@@ -171,32 +203,6 @@ static uint16_t app_crc16_ccitt(const uint8_t *data, uint16_t len)
     }
   }
   return crc;
-}
-
-static void pcSendFrame(const uint8_t *payload, uint16_t len)
-{
-  uint8_t frame[2 + 2 + 2 + APP_PAYLOAD_LEN + 2];
-  uint16_t idx = 0;
-  uint16_t crc;
-
-  frame[idx++] = APP_FRAME_SYNC1;
-  frame[idx++] = APP_FRAME_SYNC2;
-
-  frame[idx++] = (uint8_t)(frame_seq & 0xFFU);
-  frame[idx++] = (uint8_t)((frame_seq >> 8) & 0xFFU);
-
-  frame[idx++] = (uint8_t)(len & 0xFFU);
-  frame[idx++] = (uint8_t)((len >> 8) & 0xFFU);
-
-  memcpy(&frame[idx], payload, len);
-  idx += len;
-
-  crc = app_crc16_ccitt(frame, idx);
-  frame[idx++] = (uint8_t)(crc & 0xFFU);
-  frame[idx++] = (uint8_t)((crc >> 8) & 0xFFU);
-
-  uart2_tx(frame, idx);
-  frame_seq++;
 }
 
 static ReturnCode t2t_fast_read_bytes(uint8_t startPage, uint8_t *dst, uint16_t wantLen, uint16_t *outLen)
@@ -288,35 +294,8 @@ static ReturnCode t2t_read_bytes(uint8_t startPage, uint8_t *dst, uint16_t wantL
 
 static void appLogHeartbeat(uint8_t devCnt, rfalNfcState state)
 {
-#if DEBUG_LOG
-  if ((HAL_GetTick() - stat_last_ms) >= 1000U)
-  {
-    char s[220];
-
-    stat_last_ms = HAL_GetTick();
-
-    snprintf(s, sizeof(s),
-      "APP=%u reads/s=%lu err/s=%lu ov/s=%lu chg/s=%lu last_ms=%lu crc=0x%04X devCnt=%u state=%d\r\n",
-      (unsigned)appState,
-      (unsigned long)read_ok_cnt,
-      (unsigned long)read_err_cnt,
-      (unsigned long)read_overrun_cnt,
-      (unsigned long)payload_change_cnt,
-      (unsigned long)read_us_last,
-      (unsigned)last_crc16,
-      (unsigned)devCnt,
-      (int)state);
-    dbg_print(s);
-
-    read_ok_cnt = 0;
-    read_err_cnt = 0;
-    read_overrun_cnt = 0;
-    payload_change_cnt = 0;
-  }
-#else
   (void)devCnt;
   (void)state;
-#endif
 }
 
 static void appReportTag(rfalNfcDevice *dev)
@@ -385,27 +364,16 @@ static ReturnCode appReadCurrentTag(rfalNfcDevice *dev, uint8_t *buf, uint16_t b
 
 static void appProcessCurrentTagData(rfalNfcDevice *dev, const uint8_t *buf, uint16_t len)
 {
-  uint8_t payload[APP_PAYLOAD_LEN];
-
   (void)dev;
+  (void)buf;
 
   if (len < APP_PAYLOAD_LEN)
   {
+    invalid_frame_cnt++;
     return;
   }
 
-  memcpy(payload, buf, APP_PAYLOAD_LEN);
-  last_crc16 = app_crc16_ccitt(payload, APP_PAYLOAD_LEN);
-
-  if ((!have_last_payload) || (memcmp(last_payload, payload, APP_PAYLOAD_LEN) != 0))
-  {
-    memcpy(last_payload, payload, APP_PAYLOAD_LEN);
-    have_last_payload = 1;
-    payload_change_cnt++;
-  }
-
-  /* Für reines Timing/Debug erstmal deaktiviert */
-  /* pcSendFrame(payload, APP_PAYLOAD_LEN); */
+  valid_frame_cnt++;
 }
 
 static void appStartDiscover(void)
@@ -414,8 +382,6 @@ static void appStartDiscover(void)
 #if DEBUG_LOG
   char s[64];
 #endif
-
-  have_last_payload = 0;
 
   err = rfalNfcDeactivate(false);
 #if DEBUG_LOG
@@ -440,6 +406,7 @@ static void appHandleDiscover(void)
   rfalNfcDevice *devList = NULL;
   uint8_t devCnt = 0;
   rfalNfcState state = rfalNfcGetState();
+  uint16_t now_us;
 
   rfalNfcGetDevicesFound(&devList, &devCnt);
   appLogHeartbeat(devCnt, state);
@@ -447,8 +414,35 @@ static void appHandleDiscover(void)
   if ((devCnt > 0U) && (state == RFAL_NFC_STATE_ACTIVATED))
   {
     appReportTag(&devList[0]);
-    have_last_payload = 0;
-    last_read_ms = HAL_GetTick();
+
+    now_us = timer_now_us();
+
+    stat_last_ms = HAL_GetTick();
+    read_ok_cnt = 0;
+    read_err_cnt = 0;
+    read_overrun_cnt = 0;
+    payload_change_cnt = 0;
+    valid_frame_cnt = 0;
+    invalid_frame_cnt = 0;
+    missed_deadline_cnt = 0;
+
+    stat_read_count = 0;
+    stat_read_sum_us = 0;
+    stat_cycle_sum_us = 0;
+
+
+    read_time_us_last = 0;
+    read_time_us_min = 0xFFFFFFFFU;
+    read_time_us_max = 0U;
+
+    cycle_time_us_last = 0;
+    cycle_time_us_min = 0xFFFFFFFFU;
+    cycle_time_us_max = 0U;
+
+    last_read_start_us = 0;
+    last_cycle_mark_us = now_us;
+    stats_armed = 0;
+
     appState = APP_STATE_ACTIVE_READ;
   }
 }
@@ -462,8 +456,10 @@ static void appHandleActiveRead(void)
   uint16_t rcvLen = 0;
   ReturnCode rc;
   rfalNfcDevice *dev;
-  uint32_t now;
-  uint32_t dt;
+  uint16_t now_us;
+  uint16_t t0_us;
+  uint16_t t1_us;
+  uint32_t cycle_us;
 
   rfalNfcGetDevicesFound(&devList, &devCnt);
   appLogHeartbeat(devCnt, state);
@@ -477,24 +473,40 @@ static void appHandleActiveRead(void)
     return;
   }
 
-  now = HAL_GetTick();
-  dt  = now - last_read_ms;
+  now_us = timer_now_us();
+  cycle_us = timer_diff_us(now_us, last_cycle_mark_us);
 
-  if (dt < APP_STREAM_INTERVAL_MS)
+  if (cycle_us < APP_STREAM_INTERVAL_US)
   {
     return;
   }
 
-  if (dt >= (2U * APP_STREAM_INTERVAL_MS))
+  cycle_time_us_last = cycle_us;
+  stat_update_minmax(cycle_us, &cycle_time_us_min, &cycle_time_us_max);
+
+  if (cycle_us > (APP_STREAM_INTERVAL_US + APP_DEADLINE_SLACK_US))
   {
     read_overrun_cnt++;
+    missed_deadline_cnt++;
   }
 
-  last_read_ms = now;
-  read_us_last = dt;   /* aktuell in ms, nicht in us */
+  /* Deadline-basiert weiterschieben, damit kein Drift entsteht */
+  do
+  {
+    last_cycle_mark_us = (uint16_t)(last_cycle_mark_us + APP_STREAM_INTERVAL_US);
+  }
+  while (timer_diff_us(now_us, last_cycle_mark_us) >= APP_STREAM_INTERVAL_US);
 
   dev = &devList[0];
+
+  t0_us = timer_now_us();
+  last_read_start_us = t0_us;
+
   rc = appReadCurrentTag(dev, rx, sizeof(rx), &rcvLen);
+
+  t1_us = timer_now_us();
+  read_time_us_last = timer_diff_us(t1_us, t0_us);
+  stat_update_minmax(read_time_us_last, &read_time_us_min, &read_time_us_max);
 
   if (rc != ERR_NONE)
   {
@@ -512,6 +524,52 @@ static void appHandleActiveRead(void)
 
   read_ok_cnt++;
   appProcessCurrentTagData(dev, rx, rcvLen);
+
+  stat_read_count++;
+  stat_read_sum_us += read_time_us_last;
+  stat_cycle_sum_us += cycle_time_us_last;
+
+  if (stat_read_count >= APP_STAT_READ_WINDOW)
+  {
+  #if DEBUG_LOG
+    char s[260];
+    uint32_t avg_read_us = stat_read_sum_us / stat_read_count;
+    uint32_t avg_cycle_us = stat_cycle_sum_us / stat_read_count;
+    uint32_t rate_hz = (avg_cycle_us > 0U) ? (1000000U / avg_cycle_us) : 0U;
+
+    snprintf(s, sizeof(s),
+      "N=%lu rate~=%luHz read_us=%lu [%lu..%lu] cycle_us=%lu [%lu..%lu] miss=%lu err=%lu valid=%lu invalid=%lu\r\n",
+      (unsigned long)stat_read_count,
+      (unsigned long)rate_hz,
+      (unsigned long)avg_read_us,
+      (unsigned long)read_time_us_min,
+      (unsigned long)read_time_us_max,
+      (unsigned long)avg_cycle_us,
+      (unsigned long)cycle_time_us_min,
+      (unsigned long)cycle_time_us_max,
+      (unsigned long)missed_deadline_cnt,
+      (unsigned long)read_err_cnt,
+      (unsigned long)valid_frame_cnt,
+      (unsigned long)invalid_frame_cnt);
+    dbg_print(s);
+  #endif
+
+    stat_read_count = 0;
+    stat_read_sum_us = 0;
+    stat_cycle_sum_us = 0;
+
+    read_ok_cnt = 0;
+    read_err_cnt = 0;
+    read_overrun_cnt = 0;
+    missed_deadline_cnt = 0;
+    valid_frame_cnt = 0;
+    invalid_frame_cnt = 0;
+
+    read_time_us_min = 0xFFFFFFFFU;
+    read_time_us_max = 0U;
+    cycle_time_us_min = 0xFFFFFFFFU;
+    cycle_time_us_max = 0U;
+  }
 }
 
 /* USER CODE END 0 */
@@ -537,6 +595,7 @@ int main(void)
   /* USER CODE END Init */
 
   /* Configure the system clock */
+
   SystemClock_Config();
 
   /* USER CODE BEGIN SysInit */
@@ -547,7 +606,30 @@ int main(void)
   MX_GPIO_Init();
   MX_USART2_UART_Init();
   MX_SPI1_Init();
+  MX_TIM2_Init();
   /* USER CODE BEGIN 2 */
+
+  HAL_TIM_Base_Start(&htim2);
+  {
+    char s[120];
+    snprintf(s, sizeof(s),
+             "SYSCLK=%lu HCLK=%lu PCLK1=%lu\r\n",
+             HAL_RCC_GetSysClockFreq(),
+             HAL_RCC_GetHCLKFreq(),
+             HAL_RCC_GetPCLK1Freq());
+    dbg_print(s);
+  }
+  {
+    uint16_t t0 = timer_now_us();
+    HAL_Delay(20);
+    uint16_t t1 = timer_now_us();
+
+    char s[80];
+    snprintf(s, sizeof(s),
+             "TIM2 delta for 20ms delay = %u\r\n",
+             (unsigned)timer_diff_us(t1, t0));
+    dbg_print(s);
+  }
 
   dbg_print("UART OK\r\n");
   platformResetST25R();
@@ -622,10 +704,9 @@ void SystemClock_Config(void)
   /** Initializes the RCC Oscillators according to the specified parameters
   * in the RCC_OscInitTypeDef structure.
   */
-  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_MSI;
-  RCC_OscInitStruct.MSIState = RCC_MSI_ON;
-  RCC_OscInitStruct.MSICalibrationValue = 0;
-  RCC_OscInitStruct.MSIClockRange = RCC_MSIRANGE_5;
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
+  RCC_OscInitStruct.HSIState = RCC_HSI_ON;
+  RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_NONE;
   if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
   {
@@ -636,7 +717,7 @@ void SystemClock_Config(void)
   */
   RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
                               |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
-  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_MSI;
+  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_HSI;
   RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
   RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV1;
   RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
